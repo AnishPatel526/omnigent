@@ -23,13 +23,13 @@ _NATIVE_CODEX_TIMEOUT_MS = 180_000
 
 
 def _goal_response(session_id: str, method: str, suffix: str = ""):
-    """Build a Playwright response predicate for Codex goal routes."""
+    """Build a Playwright response predicate for generic goal routes."""
 
     def _matches(response) -> bool:
         parsed = urlparse(response.url)
         return (
             response.request.method == method
-            and parsed.path == f"/v1/sessions/{session_id}/codex_goal{suffix}"
+            and parsed.path == f"/v1/sessions/{session_id}/goal{suffix}"
             and response.status == 200
         )
 
@@ -66,7 +66,7 @@ def test_codex_goal_mode_with_mocked_responses(
 
     goal_toggle = page.get_by_test_id("goal-toggle")
     expect(goal_toggle).to_be_visible(timeout=30_000)
-    expect(goal_toggle).to_have_attribute("aria-label", "Set Codex goal")
+    expect(goal_toggle).to_have_attribute("aria-label", "Set goal")
 
     with page.expect_response(_goal_response(session.session_id, "GET")):
         goal_toggle.click()
@@ -101,4 +101,4 @@ def test_codex_goal_mode_with_mocked_responses(
         page.get_by_test_id("goal-clear").click()
     expect(page.get_by_test_id("goal-empty")).to_be_visible(timeout=30_000)
     expect(page.get_by_test_id("composer-goal-mode")).to_have_count(0)
-    expect(goal_toggle).to_have_attribute("aria-label", "Set Codex goal")
+    expect(goal_toggle).to_have_attribute("aria-label", "Set goal")

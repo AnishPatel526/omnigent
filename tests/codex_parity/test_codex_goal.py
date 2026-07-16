@@ -64,6 +64,14 @@ class _CodexGoalConversationStore:
                     "omnigent.wrapper": "codex-native-ui",
                 },
             ),
+            "conv_regular": Conversation(
+                id="conv_regular",
+                created_at=1,
+                updated_at=1,
+                root_conversation_id="conv_regular",
+                agent_id="ag_regular",
+                labels={},
+            ),
         }
 
     def get_conversation(self, conversation_id: str) -> Conversation | None:
@@ -108,6 +116,12 @@ class _CodexGoalRunnerClient:
             return httpx.Response(
                 status_code=self.status_code,
                 json=self.response_body,
+                request=httpx.Request("POST", url),
+            )
+        if isinstance(json, dict) and json.get("type") == "goal_clear":
+            return httpx.Response(
+                status_code=200,
+                json={"cleared": True},
                 request=httpx.Request("POST", url),
             )
         requested_status = json.get("status") if isinstance(json, dict) else None
@@ -291,6 +305,131 @@ async def test_omnigent_codex_goal_set_api_forwards_mode_configuration() -> None
             },
         )
     ]
+
+
+@pytest.mark.asyncio
+async def test_generic_goal_api_normalizes_codex_goal_identity() -> None:
+    runner_client = _CodexGoalRunnerClient()
+    app = _codex_goal_api_app(runner_client)
+    transport = httpx.ASGITransport(app=app)
+
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.put(
+            "/v1/sessions/conv_codex/goal",
+            json={
+                "objective": "Finish parity",
+                "token_budget": 40000,
+                "status": "paused",
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.json()["goal"] == {
+        "goal_id": "thread_goal_test",
+        "objective": "Finish parity",
+        "status": "paused",
+        "token_budget": 40000,
+        "tokens_used": 0,
+        "time_used_seconds": 0,
+        "created_at": None,
+        "updated_at": None,
+    }
+    assert "thread_id" not in response.json()["goal"]
+    assert runner_client.post_json_calls == [
+        (
+            "/v1/sessions/conv_codex/events",
+            {
+                "type": "goal_set",
+                "objective": "Finish parity",
+                "token_budget": 40000,
+                "status": "paused",
+            },
+        )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_generic_goal_api_preserves_omitted_and_null_token_budgets() -> None:
+    runner_client = _CodexGoalRunnerClient()
+    app = _codex_goal_api_app(runner_client)
+    transport = httpx.ASGITransport(app=app)
+
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        omitted = await client.put(
+            "/v1/sessions/conv_codex/goal",
+            json={"objective": "Keep the existing budget"},
+        )
+        cleared = await client.put(
+            "/v1/sessions/conv_codex/goal",
+            json={"objective": "Clear the budget", "token_budget": None},
+        )
+
+    assert omitted.status_code == 200
+    assert cleared.status_code == 200
+    assert runner_client.post_json_calls == [
+        (
+            "/v1/sessions/conv_codex/events",
+            {"type": "goal_set", "objective": "Keep the existing budget"},
+        ),
+        (
+            "/v1/sessions/conv_codex/events",
+            {
+                "type": "goal_set",
+                "objective": "Clear the budget",
+                "token_budget": None,
+            },
+        ),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_generic_goal_api_supports_read_status_and_clear() -> None:
+    runner_client = _CodexGoalRunnerClient()
+    app = _codex_goal_api_app(runner_client)
+    transport = httpx.ASGITransport(app=app)
+
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        read = await client.get("/v1/sessions/conv_codex/goal")
+        pause = await client.patch(
+            "/v1/sessions/conv_codex/goal/status",
+            json={"status": "paused"},
+        )
+        clear = await client.delete("/v1/sessions/conv_codex/goal")
+
+    assert read.status_code == 200
+    assert read.json()["goal"]["goal_id"] == "thread_goal_test"
+    assert pause.status_code == 200
+    assert pause.json()["goal"]["status"] == "paused"
+    assert clear.status_code == 200
+    assert clear.json() == {"cleared": True}
+
+
+@pytest.mark.asyncio
+async def test_generic_goal_api_rejects_unsupported_sessions_with_typed_error() -> None:
+    runner_client = _CodexGoalRunnerClient()
+    app = _codex_goal_api_app(runner_client)
+    transport = httpx.ASGITransport(app=app)
+
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get("/v1/sessions/conv_regular/goal")
+
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "goal_not_supported"
+    assert runner_client.post_json_calls == []
+
+
+@pytest.mark.asyncio
+async def test_legacy_codex_goal_route_keeps_thread_id_shape() -> None:
+    runner_client = _CodexGoalRunnerClient()
+    app = _codex_goal_api_app(runner_client)
+    transport = httpx.ASGITransport(app=app)
+
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get("/v1/sessions/conv_codex/codex_goal")
+
+    assert response.status_code == 200
+    assert response.json()["goal"]["thread_id"] == "thread_goal_test"
+    assert "goal_id" not in response.json()["goal"]
 
 
 @pytest.mark.asyncio

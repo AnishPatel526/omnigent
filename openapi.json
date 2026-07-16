@@ -569,6 +569,20 @@
         "title": "ClearCodexGoalResponse",
         "type": "object"
       },
+      "ClearGoalResponse": {
+        "description": "Response body for `DELETE /v1/sessions/{id}/goal`.",
+        "properties": {
+          "cleared": {
+            "title": "Cleared",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "cleared"
+        ],
+        "title": "ClearGoalResponse",
+        "type": "object"
+      },
       "ClientTaskCancelEvent": {
         "description": "Server-side request that the client cancel a tunneled tool call.\n\nEmitted by `omnigent/runtime/workflow.py` when a parent\ncancellation needs to propagate to a long-running async client\ntool. Wire shape matches `workflow.py:4258-4266`.",
         "properties": {
@@ -1619,6 +1633,96 @@
           "output"
         ],
         "title": "FunctionCallOutputData",
+        "type": "object"
+      },
+      "GoalObject": {
+        "description": "Provider-neutral goal state returned by the session goal API.",
+        "properties": {
+          "created_at": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Created At"
+          },
+          "goal_id": {
+            "title": "Goal Id",
+            "type": "string"
+          },
+          "objective": {
+            "title": "Objective",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "time_used_seconds": {
+            "minimum": 0.0,
+            "title": "Time Used Seconds",
+            "type": "integer"
+          },
+          "token_budget": {
+            "anyOf": [
+              {
+                "exclusiveMinimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Token Budget"
+          },
+          "tokens_used": {
+            "minimum": 0.0,
+            "title": "Tokens Used",
+            "type": "integer"
+          },
+          "updated_at": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Updated At"
+          }
+        },
+        "required": [
+          "goal_id",
+          "objective",
+          "status",
+          "tokens_used",
+          "time_used_seconds"
+        ],
+        "title": "GoalObject",
+        "type": "object"
+      },
+      "GoalResponse": {
+        "description": "Response body for reading or mutating a session goal.",
+        "properties": {
+          "goal": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/GoalObject"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "goal"
+        ],
+        "title": "GoalResponse",
         "type": "object"
       },
       "GrantPermissionRequest": {
@@ -4719,6 +4823,22 @@
             "description": "Git branch checked out in the session's worktree, e.g. `\"feature/login\"`. Set only when the session was created with a server-created git worktree; `None` otherwise. The Web UI uses a non-`None` value to offer the \"delete local branch\" cleanup checkbox on session delete. See designs/SESSION_GIT_WORKTREE.md.",
             "title": "Git Branch"
           },
+          "goal_mode": {
+            "anyOf": [
+              {
+                "enum": [
+                  "codex",
+                  "managed"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Goal backend exposed by the generic session goal API. `\"codex\"` delegates to Codex app-server; `\"managed\"` is reserved for Omnigent-managed goals. `None` means goal mode is unavailable.",
+            "title": "Goal Mode"
+          },
           "harness": {
             "anyOf": [
               {
@@ -5581,6 +5701,50 @@
         "title": "SetCodexGoalRequest",
         "type": "object"
       },
+      "SetGoalRequest": {
+        "additionalProperties": false,
+        "description": "Request body for `PUT /v1/sessions/{id}/goal`.",
+        "properties": {
+          "objective": {
+            "maxLength": 4000,
+            "minLength": 1,
+            "title": "Objective",
+            "type": "string"
+          },
+          "status": {
+            "anyOf": [
+              {
+                "enum": [
+                  "active",
+                  "paused"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Status"
+          },
+          "token_budget": {
+            "anyOf": [
+              {
+                "exclusiveMinimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Token Budget"
+          }
+        },
+        "required": [
+          "objective"
+        ],
+        "title": "SetGoalRequest",
+        "type": "object"
+      },
       "SetSharingRequest": {
         "description": "Body for `PUT /v1/sharing`.\n\nBoth fields are optional so an admin can update either setting\nindependently; at least one must be present.",
         "properties": {
@@ -6009,6 +6173,25 @@
           }
         },
         "title": "UpdateDefaultPolicyRequest",
+        "type": "object"
+      },
+      "UpdateGoalStatusRequest": {
+        "additionalProperties": false,
+        "description": "Request body for `PATCH /v1/sessions/{id}/goal/status`.",
+        "properties": {
+          "status": {
+            "enum": [
+              "active",
+              "paused"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status"
+        ],
+        "title": "UpdateGoalStatusRequest",
         "type": "object"
       },
       "UpdateSessionPolicyRequest": {
@@ -8993,6 +9176,190 @@
         "summary": "Update Comment",
         "tags": [
           "comments"
+        ]
+      }
+    },
+    "/v1/sessions/{session_id}/goal": {
+      "delete": {
+        "operationId": "clear_goal_v1_sessions__session_id__goal_delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "title": "Session Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ClearGoalResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Clear Goal",
+        "tags": [
+          "sessions"
+        ]
+      },
+      "get": {
+        "operationId": "get_goal_v1_sessions__session_id__goal_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "title": "Session Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GoalResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Goal",
+        "tags": [
+          "sessions"
+        ]
+      },
+      "put": {
+        "operationId": "set_goal_v1_sessions__session_id__goal_put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "title": "Session Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetGoalRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GoalResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Set Goal",
+        "tags": [
+          "sessions"
+        ]
+      }
+    },
+    "/v1/sessions/{session_id}/goal/status": {
+      "patch": {
+        "operationId": "update_goal_status_v1_sessions__session_id__goal_status_patch",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "title": "Session Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateGoalStatusRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GoalResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Update Goal Status",
+        "tags": [
+          "sessions"
         ]
       }
     },

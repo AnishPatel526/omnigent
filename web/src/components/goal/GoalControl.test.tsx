@@ -13,6 +13,7 @@ vi.mock("./GoalDialog", () => ({
 }));
 
 const GOAL: Goal = {
+  goalId: "thread-1",
   objective: "Ship goal mode",
   status: "active",
   tokenBudget: 40000,
@@ -45,6 +46,7 @@ describe("GoalControl", () => {
     fireEvent.click(screen.getByTestId("goal-toggle"));
     expect(screen.getByTestId("mock-goal-dialog")).toHaveAttribute("data-open", "true");
     expect(screen.getByTestId("goal-toggle")).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByTestId("goal-toggle")).toHaveAttribute("aria-label", "View goal");
   });
 
   it("disables the button without a conversation", () => {

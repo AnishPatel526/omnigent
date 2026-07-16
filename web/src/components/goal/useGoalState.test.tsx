@@ -11,6 +11,7 @@ vi.mock("@/lib/goalApi", async (importOriginal) => {
 const mockGetGoal = vi.mocked(getGoal);
 
 const GOAL: Goal = {
+  goalId: "thread-1",
   objective: "Ship goal mode",
   status: "active",
   tokenBudget: 40000,

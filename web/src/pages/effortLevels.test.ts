@@ -166,12 +166,11 @@ describe("shouldShowCodexPlanModeControl", () => {
 });
 
 describe("shouldShowGoalControl", () => {
-  it("keeps the goal control Codex-only until a generic capability exists", () => {
-    expect(shouldShowGoalControl({ labels: { "omnigent.wrapper": "codex-native-ui" } })).toBe(true);
-    expect(shouldShowGoalControl({ labels: { "omnigent.wrapper": "claude-code-native-ui" } })).toBe(
-      false,
-    );
-    expect(shouldShowGoalControl({ labels: {} })).toBe(false);
+  it("uses the server-provided generic goal capability", () => {
+    expect(shouldShowGoalControl({ goalMode: "codex" })).toBe(true);
+    expect(shouldShowGoalControl({ goalMode: "managed" })).toBe(true);
+    expect(shouldShowGoalControl({ goalMode: null })).toBe(false);
+    expect(shouldShowGoalControl({})).toBe(false);
     expect(shouldShowGoalControl(null)).toBe(false);
   });
 });

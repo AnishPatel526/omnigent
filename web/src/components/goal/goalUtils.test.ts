@@ -10,6 +10,7 @@ import {
 } from "./goalUtils";
 
 const GOAL: Goal = {
+  goalId: "thread-1",
   objective: "Ship goal mode",
   status: "active",
   tokenBudget: 40000,

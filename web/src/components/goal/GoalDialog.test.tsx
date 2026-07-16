@@ -21,6 +21,7 @@ const mockClearGoal = vi.mocked(clearGoal);
 const mockUpdateGoalStatus = vi.mocked(updateGoalStatus);
 
 const ACTIVE_GOAL: Goal = {
+  goalId: "thread-1",
   objective: "Ship goal mode",
   status: "active",
   tokenBudget: 40000,

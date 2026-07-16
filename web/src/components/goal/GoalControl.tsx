@@ -12,20 +12,11 @@ interface GoalControlProps {
   readOnly: boolean;
   goal: Goal | null;
   onGoalChange: (goal: Goal | null) => void;
-  /** Optional backend name used by the current Codex-only tooltip. */
-  backendLabel?: string;
 }
 
 /** Toolbar button plus dialog for a goal-capable session. */
-export function GoalControl({
-  conversationId,
-  readOnly,
-  goal,
-  onGoalChange,
-  backendLabel,
-}: GoalControlProps) {
+export function GoalControl({ conversationId, readOnly, goal, onGoalChange }: GoalControlProps) {
   const [open, setOpen] = useState(false);
-  const goalName = backendLabel ? `${backendLabel} goal` : "goal";
 
   useEffect(() => {
     if (!conversationId) setOpen(false);
@@ -45,7 +36,7 @@ export function GoalControl({
             )}
             disabled={!conversationId}
             aria-pressed={goal != null}
-            aria-label={goal ? `View ${goalName}` : `Set ${goalName}`}
+            aria-label={goal ? "View goal" : "Set goal"}
             data-testid="goal-toggle"
             data-active={goal ? "true" : undefined}
             onClick={() => setOpen(true)}
@@ -54,7 +45,7 @@ export function GoalControl({
             <span>Goal</span>
           </Button>
         </TooltipTrigger>
-        <TooltipContent>{goal ? `View ${goalName}` : `Set ${goalName}`}</TooltipContent>
+        <TooltipContent>{goal ? "View goal" : "Set goal"}</TooltipContent>
       </Tooltip>
       <GoalDialog
         open={open}

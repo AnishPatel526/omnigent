@@ -836,6 +836,34 @@ runner, waits for registration, then PATCHes the session to the new
 runner id. The write replaces any previous value in
 `conversations.runner_id`; no history table is maintained.
 
+### Session Goal
+
+Goal-capable sessions advertise `goal_mode` in `SessionResponse`:
+
+- `"codex"` delegates goal state to Codex app-server.
+- `"managed"` is reserved for an Omnigent-managed implementation.
+- `null` means this session does not support Goal mode.
+
+Clients should gate Goal controls on this capability instead of harness or
+wrapper labels. The provider-neutral API is:
+
+```
+GET    /v1/sessions/{session_id}/goal
+PUT    /v1/sessions/{session_id}/goal
+PATCH  /v1/sessions/{session_id}/goal/status
+DELETE /v1/sessions/{session_id}/goal
+```
+
+`GET`, `PUT`, and `PATCH` return `{ "goal": GoalObject | null }`. The generic
+object uses `goal_id` for the backend-owned identity; for Codex sessions this
+is the Codex thread id. `PUT` accepts `objective`, optional `token_budget`, and
+optional `status` (`"active"` or `"paused"`). `PATCH` accepts only `status`.
+`DELETE` returns `{ "cleared": boolean }`.
+
+Unsupported sessions return 400 with error code `goal_not_supported`. The
+legacy `/v1/sessions/{session_id}/codex_goal` routes remain available with
+their existing `thread_id` response shape for compatibility.
+
 ### Codex-specific APIs
 
 Codex-native session routes, including the Codex Goal subresource, are

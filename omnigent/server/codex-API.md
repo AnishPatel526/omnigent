@@ -16,6 +16,11 @@ first tries to wake the session's existing host/workspace binding and
 initializes the relaunched runner before retrying the goal control. The
 caller cannot choose a new host or workspace through these routes.
 
+New clients should use the provider-neutral `/v1/sessions/{session_id}/goal`
+API documented in [API.md](API.md#session-goal). The `/codex_goal` routes below
+remain as a compatibility surface and retain the Codex-specific `thread_id`
+response field.
+
 All routes are valid only for sessions stamped with
 `omnigent.wrapper=codex-native-ui`.
 

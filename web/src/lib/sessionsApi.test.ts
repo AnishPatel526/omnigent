@@ -78,6 +78,7 @@ describe("createSession", () => {
       status: "idle",
       createdAt: 1704067200,
       title: null,
+      goalMode: null,
       items: [],
       queuedItems: undefined,
       contextWindow: undefined,
@@ -637,6 +638,37 @@ describe("getSession", () => {
     );
     const session = await getSession("conv_abc");
     expect(session.permissionLevel).toBe(4);
+  });
+
+  it("maps goal_mode from the session capability snapshot", async () => {
+    fetchMock.mockResolvedValueOnce(
+      mockJsonResponse({
+        id: "conv_codex",
+        agent_id: "ag",
+        status: "idle",
+        created_at: 0,
+        goal_mode: "codex",
+      }),
+    );
+
+    const session = await getSession("conv_codex");
+
+    expect(session.goalMode).toBe("codex");
+  });
+
+  it("defaults a missing goal_mode capability to null", async () => {
+    fetchMock.mockResolvedValueOnce(
+      mockJsonResponse({
+        id: "conv_regular",
+        agent_id: "ag",
+        status: "idle",
+        created_at: 0,
+      }),
+    );
+
+    const session = await getSession("conv_regular");
+
+    expect(session.goalMode).toBeNull();
   });
 
   it("treats a missing permission_level as null", async () => {

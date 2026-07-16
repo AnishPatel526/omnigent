@@ -57,6 +57,7 @@ class ErrorCode:
     HARNESS_PROTOCOL_VIOLATION = "harness_protocol_violation"
     RUNNER_UNAVAILABLE = "runner_unavailable"
     RUNNER_CAPABILITY_MISMATCH = "runner_capability_mismatch"
+    GOAL_NOT_SUPPORTED = "goal_not_supported"
     # Keep the string equal to frames.HARNESS_NOT_CONFIGURED_ERROR_CODE —
     # the host's wire error code passes through as the API error code.
     HARNESS_NOT_CONFIGURED = "harness_not_configured"
@@ -77,6 +78,7 @@ _CODE_TO_HTTP_STATUS: dict[str, int] = {
     ErrorCode.HARNESS_PROTOCOL_VIOLATION: 500,
     ErrorCode.RUNNER_UNAVAILABLE: 503,
     ErrorCode.RUNNER_CAPABILITY_MISMATCH: 503,
+    ErrorCode.GOAL_NOT_SUPPORTED: 400,
     # 412 Precondition Failed: the request is well-formed but the host
     # can't satisfy it until the user runs `omnigent setup` there —
     # neither a 400 (input is fine) nor a 503 (a retry won't help).

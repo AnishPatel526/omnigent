@@ -1550,6 +1550,9 @@ class ModelUsage(BaseModel):
     total_cost_usd: float | None = None
 
 
+GoalMode = Literal["codex", "managed"]
+
+
 class SessionResponse(BaseModel):
     """
     API representation of a session.
@@ -1583,6 +1586,9 @@ class SessionResponse(BaseModel):
         ``"debugging auth flow"``. ``None`` when unset.
     :param labels: Session-scoped guardrails labels. Empty dict
         when no labels have been written.
+    :param goal_mode: Goal backend exposed by the generic session goal API.
+        ``"codex"`` delegates to Codex app-server; ``"managed"`` is reserved
+        for Omnigent-managed goals. ``None`` means goal mode is unavailable.
     :param runner_id: Runner currently bound to this session, e.g.
         ``"runner_abc123"``. ``None`` until a client binds one via
         ``PATCH /v1/sessions/{id}``.
@@ -1794,6 +1800,7 @@ class SessionResponse(BaseModel):
     created_at: int
     title: str | None = None
     labels: dict[str, str] = Field(default_factory=dict)
+    goal_mode: GoalMode | None = None
     runner_id: str | None = None
     host_id: str | None = None
     runner_online: bool | None = None
@@ -1940,6 +1947,49 @@ class AutomaticSessionRenameResponse(BaseModel):
     renamed: bool
     title: str | None = None
     reason: Literal["not_top_level", "no_seed", "title_changed"] | None = None
+
+
+class GoalObject(BaseModel):
+    """Provider-neutral goal state returned by the session goal API."""
+
+    goal_id: str
+    objective: str
+    status: str
+    token_budget: Annotated[int, Strict(), Field(gt=0)] | None = None
+    tokens_used: Annotated[int, Strict(), Field(ge=0)]
+    time_used_seconds: Annotated[int, Strict(), Field(ge=0)]
+    created_at: int | None = None
+    updated_at: int | None = None
+
+
+class GoalResponse(BaseModel):
+    """Response body for reading or mutating a session goal."""
+
+    goal: GoalObject | None
+
+
+class SetGoalRequest(BaseModel):
+    """Request body for ``PUT /v1/sessions/{id}/goal``."""
+
+    objective: str = Field(min_length=1, max_length=4000)
+    token_budget: Annotated[int, Strict(), Field(gt=0)] | None = None
+    status: Literal["active", "paused"] | None = None
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class UpdateGoalStatusRequest(BaseModel):
+    """Request body for ``PATCH /v1/sessions/{id}/goal/status``."""
+
+    status: Literal["active", "paused"]
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class ClearGoalResponse(BaseModel):
+    """Response body for ``DELETE /v1/sessions/{id}/goal``."""
+
+    cleared: bool
 
 
 class CodexGoalObject(BaseModel):

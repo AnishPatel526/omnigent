@@ -536,6 +536,51 @@ def test_codex_native_builtin_session_can_be_created(
 
 @pytest.mark.skipif(
     os.environ.get("OMNIGENT_E2E_CODEX_NATIVE") != "1" or shutil.which("codex") is None,
+    reason="generic Goal API e2e needs `codex` on PATH and OMNIGENT_E2E_CODEX_NATIVE=1",
+)
+def test_codex_native_generic_goal_api_round_trip(
+    live_server: str,
+    http_client: httpx.Client,
+    tmp_path: Path,
+) -> None:
+    """Set, read, and clear a Codex goal through the provider-neutral API."""
+    workspace = tmp_path / "codex_goal_ws"
+    workspace.mkdir()
+    daemon = _spawn_host_daemon(tmp_path=tmp_path, live_server=live_server)
+    try:
+        session_id = _create_codex_host_session(
+            http_client,
+            agent_id=_codex_native_agent_id(http_client),
+            host_id=_online_host_id(http_client),
+            workspace=str(workspace),
+        )
+
+        set_response = http_client.put(
+            f"/v1/sessions/{session_id}/goal",
+            json={"objective": "Verify the generic Goal API", "token_budget": 40_000},
+            timeout=30.0,
+        )
+        set_response.raise_for_status()
+        assert set_response.json()["goal"]["goal_id"]
+
+        read_response = http_client.get(f"/v1/sessions/{session_id}/goal", timeout=30.0)
+        read_response.raise_for_status()
+        assert read_response.json()["goal"]["objective"] == "Verify the generic Goal API"
+
+        clear_response = http_client.delete(f"/v1/sessions/{session_id}/goal", timeout=30.0)
+        clear_response.raise_for_status()
+        assert clear_response.json() == {"cleared": True}
+    finally:
+        daemon.send_signal(signal.SIGTERM)
+        try:
+            daemon.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            daemon.kill()
+            daemon.wait()
+
+
+@pytest.mark.skipif(
+    os.environ.get("OMNIGENT_E2E_CODEX_NATIVE") != "1" or shutil.which("codex") is None,
     reason=(
         "codex-native round-trip e2e needs `codex` on PATH and OMNIGENT_E2E_CODEX_NATIVE=1 to run"
     ),

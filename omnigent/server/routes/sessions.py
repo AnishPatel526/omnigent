@@ -2761,6 +2761,9 @@ def _build_session_response(
     labels = labels_with_closed_status(conv.labels, conv.title)
     if agent_name in (_CLAUDE_NATIVE_MODEL, _CODEX_NATIVE_MODEL):
         labels = {**labels, _CLAUDE_NATIVE_UI_LABEL_KEY: _CLAUDE_NATIVE_UI_LABEL_VALUE}
+    goal_mode: Literal["codex", "managed"] | None = None
+    if labels.get(_CLAUDE_NATIVE_WRAPPER_LABEL_KEY) == _CODEX_NATIVE_WRAPPER_LABEL_VALUE:
+        goal_mode = "codex"
     return SessionResponse(
         id=conv.id,
         agent_id=conv.agent_id,
@@ -2770,6 +2773,7 @@ def _build_session_response(
         created_at=conv.created_at,
         title=title_without_closed_marker(conv.title),
         labels=labels,
+        goal_mode=goal_mode,
         runner_id=conv.runner_id,
         host_id=conv.host_id,
         runner_online=runner_online,

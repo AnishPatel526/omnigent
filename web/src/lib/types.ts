@@ -227,6 +227,8 @@ export interface ModelUsage {
   totalCostUsd: number | null;
 }
 
+export type GoalMode = "codex" | "managed";
+
 export interface Session {
   id: string;
   agentId: string;
@@ -276,6 +278,8 @@ export interface Session {
    * `omnigent.fork.source_id` on an unbound coding clone).
    */
   labels?: Record<string, string>;
+  /** Goal backend advertised by the session; null when goal mode is unavailable. */
+  goalMode?: GoalMode | null;
   /**
    * Canonical working directory the runner starts in, e.g.
    * ``"/Users/alice/myrepo"`` (or a worktree path). ``null`` when

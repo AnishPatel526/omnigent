@@ -270,6 +270,34 @@ async def test_session_snapshot_uses_child_spec_metadata(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("labels", "expected_mode"),
+    [
+        ({"omnigent.wrapper": "codex-native-ui"}, "codex"),
+        ({}, None),
+    ],
+)
+async def test_session_snapshot_advertises_goal_mode(
+    labels: dict[str, str],
+    expected_mode: str | None,
+) -> None:
+    session_id = "f97f3139c54c4ea9a4506038aaae8d5f"
+    conversation = Conversation(
+        id=session_id,
+        created_at=1,
+        updated_at=1,
+        root_conversation_id=session_id,
+        agent_id="087b7cb7ac30abf4debfaa578d052ec6",
+        labels=labels,
+    )
+    store = _ConversationStore([], conversations={session_id: conversation})
+
+    snapshot = await _get_session_snapshot(store, session_id)  # type: ignore[arg-type]
+
+    assert snapshot.goal_mode == expected_mode
+
+
+@pytest.mark.asyncio
 async def test_session_snapshot_populates_runner_online_from_session_lookup() -> None:
     """GET /sessions/{id} carries session-scoped runner + host liveness."""
     conv_store = _ConversationStore([_message_item("item_1", "hi")])

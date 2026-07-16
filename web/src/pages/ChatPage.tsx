@@ -1062,6 +1062,7 @@ export function ChatPage() {
   // Once present, the live session snapshot is authoritative.
   const capabilitySource = {
     labels: activeSession ? (activeSession.labels ?? {}) : (activeConv?.labels ?? {}),
+    goalMode: activeSession?.goalMode ?? null,
   };
   const modelPickerKind = modelPickerKindForConv(capabilitySource);
   const effortLevels = effortLevelsForConv(
@@ -4941,7 +4942,6 @@ export function Composer({
                 readOnly={isReadOnly}
                 goal={goal}
                 onGoalChange={setGoalState}
-                backendLabel="Codex"
               />
             )}
             <AgentPicker
@@ -5288,15 +5288,13 @@ export function shouldShowCodexPlanModeControl(
 /**
  * True when the session Goal control should be visible.
  *
- * @param conv - Session or sidebar row carrying labels. ``null`` or missing
- *   labels fail closed.
- * @returns True only for Codex-native wrapper sessions until the server
- *   advertises a generic goal capability.
+ * @param conv - Session capability snapshot. Missing capabilities fail closed.
+ * @returns True for any backend supported by the generic goal API.
  */
 export function shouldShowGoalControl(
-  conv: { labels?: Record<string, string | null> | null } | null | undefined,
+  conv: { goalMode?: "codex" | "managed" | null } | null | undefined,
 ): boolean {
-  return isCodexNativeSession(conv);
+  return conv?.goalMode === "codex" || conv?.goalMode === "managed";
 }
 
 /**

@@ -132,6 +132,8 @@ interface SessionResponseWire {
    */
   title?: string | null;
   labels?: Record<string, string>;
+  /** Provider-neutral goal backend capability. */
+  goal_mode?: "codex" | "managed" | null;
   /** Canonical working directory; ``null`` when unbound. */
   workspace?: string | null;
   /** Worktree branch; ``null`` when the session uses no worktree. */
@@ -287,6 +289,7 @@ function sessionFromWire(wire: SessionResponseWire): Session {
     createdAt: wire.created_at,
     title: wire.title ?? null,
     labels: wire.labels,
+    goalMode: wire.goal_mode ?? null,
     workspace: wire.workspace ?? null,
     gitBranch: wire.git_branch ?? null,
     items: wire.items ?? [],

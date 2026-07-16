@@ -24,6 +24,7 @@ from omnigent.server.auth import LEVEL_EDIT, LEVEL_READ, AuthProvider
 from omnigent.server.host_registry import RunnerExitReports
 from omnigent.server.routes._auth_helpers import get_user_id as _get_user_id
 from omnigent.server.routes._auth_helpers import require_access as _require_access
+from omnigent.server.routes.goals import register_goal_routes
 from omnigent.server.routes.sessions import (
     _CLAUDE_NATIVE_WRAPPER_LABEL_KEY,
     _HOST_BOUND_RUNNER_CONNECT_GRACE_S,
@@ -37,7 +38,12 @@ from omnigent.server.routes.sessions import (
 )
 from omnigent.server.schemas import (
     ClearCodexGoalResponse,
+    ClearGoalResponse,
+    CodexGoalObject,
     CodexGoalResponse,
+    GoalMode,
+    GoalObject,
+    GoalResponse,
     SetCodexGoalRequest,
     UpdateCodexGoalStatusRequest,
 )
@@ -462,6 +468,217 @@ async def _require_codex_native_goal_session(
     return conv
 
 
+def _goal_from_codex(goal: CodexGoalObject) -> GoalObject:
+    """Project a validated Codex goal onto the generic API shape."""
+    return GoalObject(
+        goal_id=goal.thread_id,
+        objective=goal.objective,
+        status=goal.status,
+        token_budget=goal.token_budget,
+        tokens_used=goal.tokens_used,
+        time_used_seconds=goal.time_used_seconds,
+        created_at=goal.created_at,
+        updated_at=goal.updated_at,
+    )
+
+
+def _codex_from_goal(goal: GoalObject) -> dict[str, Any]:
+    """Project a generic goal back onto the legacy Codex response shape."""
+    return {
+        "thread_id": goal.goal_id,
+        "objective": goal.objective,
+        "status": goal.status,
+        "token_budget": goal.token_budget,
+        "tokens_used": goal.tokens_used,
+        "time_used_seconds": goal.time_used_seconds,
+        "created_at": goal.created_at,
+        "updated_at": goal.updated_at,
+    }
+
+
+def _legacy_goal_response(result: GoalResponse | Response) -> CodexGoalResponse | Response:
+    """Convert an adapter response to the legacy ``/codex_goal`` contract."""
+    if isinstance(result, Response):
+        return result
+    if result.goal is None:
+        return CodexGoalResponse(goal=None)
+    return CodexGoalResponse.model_validate({"goal": _codex_from_goal(result.goal)})
+
+
+def _legacy_clear_response(
+    result: ClearGoalResponse | Response,
+) -> ClearCodexGoalResponse | Response:
+    """Convert an adapter clear response to the legacy contract."""
+    if isinstance(result, Response):
+        return result
+    return ClearCodexGoalResponse(cleared=result.cleared)
+
+
+class CodexExternalGoalAdapter:
+    """Expose Codex app-server goal state through the generic goal contract."""
+
+    mode: GoalMode = "codex"
+
+    def __init__(
+        self,
+        *,
+        conversation_store: ConversationStore,
+        runner_router: RunnerRouter | None,
+        permission_store: PermissionStore | None,
+        runner_exit_reports: RunnerExitReports | None,
+    ) -> None:
+        self._conversation_store = conversation_store
+        self._runner_router = runner_router
+        self._permission_store = permission_store
+        self._runner_exit_reports = runner_exit_reports
+
+    def supports(self, conversation: Conversation) -> bool:
+        """Return whether the session wraps a Codex-native app-server thread."""
+        return (
+            conversation.labels.get(_CLAUDE_NATIVE_WRAPPER_LABEL_KEY)
+            == CODEX_NATIVE_CODING_AGENT.wrapper_label
+        )
+
+    async def _payload(
+        self,
+        request: Request,
+        conversation: Conversation,
+        *,
+        user_id: str | None,
+        action: str,
+        event: dict[str, Any],
+    ) -> dict[str, Any] | JSONResponse | None:
+        runner_result = await _forward_codex_goal_event(
+            session_id=conversation.id,
+            conv=conversation,
+            event=event,
+            request=request,
+            user_id=user_id,
+            runner_router=self._runner_router,
+            conversation_store=self._conversation_store,
+            permission_store=self._permission_store,
+            runner_exit_reports=self._runner_exit_reports,
+        )
+        if runner_result is None and event.get("type") == "goal_get":
+            return None
+        return _require_codex_goal_runner_payload(
+            conversation.id,
+            action=action,
+            runner_result=runner_result,
+        )
+
+    @staticmethod
+    def _goal_response(
+        payload: dict[str, Any],
+        *,
+        action: str,
+    ) -> GoalResponse | Response:
+        try:
+            response = CodexGoalResponse.model_validate(payload)
+        except ValueError:
+            return _codex_goal_error(
+                502,
+                detail=f"Could not {action}: runner returned a malformed response.",
+            )
+        return GoalResponse(
+            goal=None if response.goal is None else _goal_from_codex(response.goal),
+        )
+
+    async def read(
+        self,
+        request: Request,
+        conversation: Conversation,
+        *,
+        user_id: str | None,
+    ) -> GoalResponse | Response:
+        payload = await self._payload(
+            request,
+            conversation,
+            user_id=user_id,
+            action="read",
+            event={"type": "goal_get"},
+        )
+        if payload is None:
+            return GoalResponse(goal=None)
+        if isinstance(payload, JSONResponse):
+            return payload
+        return self._goal_response(payload, action="read Codex goal")
+
+    async def set(
+        self,
+        request: Request,
+        conversation: Conversation,
+        *,
+        user_id: str | None,
+        objective: str,
+        token_budget: int | None,
+        token_budget_provided: bool,
+        status: str | None,
+    ) -> GoalResponse | Response:
+        event: dict[str, Any] = {"type": "goal_set", "objective": objective}
+        if token_budget_provided:
+            event["token_budget"] = token_budget
+        if status is not None:
+            event["status"] = status
+        payload = await self._payload(
+            request,
+            conversation,
+            user_id=user_id,
+            action="set",
+            event=event,
+        )
+        if isinstance(payload, JSONResponse):
+            return payload
+        assert payload is not None
+        return self._goal_response(payload, action="set Codex goal")
+
+    async def update_status(
+        self,
+        request: Request,
+        conversation: Conversation,
+        *,
+        user_id: str | None,
+        status: str,
+    ) -> GoalResponse | Response:
+        payload = await self._payload(
+            request,
+            conversation,
+            user_id=user_id,
+            action="update status",
+            event={"type": "goal_status", "status": status},
+        )
+        if isinstance(payload, JSONResponse):
+            return payload
+        assert payload is not None
+        return self._goal_response(payload, action="update Codex goal status")
+
+    async def clear(
+        self,
+        request: Request,
+        conversation: Conversation,
+        *,
+        user_id: str | None,
+    ) -> ClearGoalResponse | Response:
+        payload = await self._payload(
+            request,
+            conversation,
+            user_id=user_id,
+            action="clear",
+            event={"type": "goal_clear"},
+        )
+        if isinstance(payload, JSONResponse):
+            return payload
+        assert payload is not None
+        try:
+            response = ClearCodexGoalResponse.model_validate(payload)
+        except ValueError:
+            return _codex_goal_error(
+                502,
+                detail="Could not clear Codex goal: runner returned a malformed response.",
+            )
+        return ClearGoalResponse(cleared=response.cleared)
+
+
 def register_codex_session_routes(
     router: APIRouter,
     *,
@@ -472,6 +689,20 @@ def register_codex_session_routes(
     runner_exit_reports: RunnerExitReports | None,
 ) -> None:
     """Register Codex-native session subresources on the shared router."""
+
+    adapter = CodexExternalGoalAdapter(
+        conversation_store=conversation_store,
+        runner_router=runner_router,
+        permission_store=permission_store,
+        runner_exit_reports=runner_exit_reports,
+    )
+    register_goal_routes(
+        router,
+        conversation_store=conversation_store,
+        auth_provider=auth_provider,
+        permission_store=permission_store,
+        adapters=(adapter,),
+    )
 
     @router.get(
         "/sessions/{session_id}/codex_goal",
@@ -501,34 +732,7 @@ def register_codex_session_routes(
             conversation_store,
         )
         conv = await _require_codex_native_goal_session(session_id, conversation_store)
-        runner_result = await _forward_codex_goal_event(
-            session_id=session_id,
-            conv=conv,
-            event={"type": "goal_get"},
-            request=request,
-            user_id=user_id,
-            runner_router=runner_router,
-            conversation_store=conversation_store,
-            permission_store=permission_store,
-            runner_exit_reports=runner_exit_reports,
-        )
-        if runner_result is None:
-            return CodexGoalResponse(goal=None)
-        runner_payload = _require_codex_goal_runner_payload(
-            session_id,
-            action="read",
-            runner_result=runner_result,
-        )
-        if isinstance(runner_payload, JSONResponse):
-            return runner_payload
-        try:
-            return CodexGoalResponse.model_validate(runner_payload)
-        except ValueError as exc:
-            del exc
-            return _codex_goal_error(
-                502,
-                detail="Could not read Codex goal: runner returned a malformed response.",
-            )
+        return _legacy_goal_response(await adapter.read(request, conv, user_id=user_id))
 
     @router.put(
         "/sessions/{session_id}/codex_goal",
@@ -567,39 +771,17 @@ def register_codex_session_routes(
                 "codex_goal objective must be non-empty",
                 code=ErrorCode.INVALID_INPUT,
             )
-        event: dict[str, Any] = {
-            "type": "goal_set",
-            "objective": objective,
-        }
-        if "token_budget" in body.model_fields_set:
-            event["token_budget"] = body.token_budget
-        if body.status is not None:
-            event["status"] = body.status
-        runner_payload = _require_codex_goal_runner_payload(
-            session_id,
-            action="set",
-            runner_result=await _forward_codex_goal_event(
-                session_id=session_id,
-                conv=conv,
-                event=event,
-                request=request,
+        return _legacy_goal_response(
+            await adapter.set(
+                request,
+                conv,
                 user_id=user_id,
-                runner_router=runner_router,
-                conversation_store=conversation_store,
-                permission_store=permission_store,
-                runner_exit_reports=runner_exit_reports,
-            ),
-        )
-        if isinstance(runner_payload, JSONResponse):
-            return runner_payload
-        try:
-            return CodexGoalResponse.model_validate(runner_payload)
-        except ValueError as exc:
-            del exc
-            return _codex_goal_error(
-                502,
-                detail="Could not set Codex goal: runner returned a malformed response.",
+                objective=objective,
+                token_budget=body.token_budget,
+                token_budget_provided="token_budget" in body.model_fields_set,
+                status=body.status,
             )
+        )
 
     @router.patch(
         "/sessions/{session_id}/codex_goal/status",
@@ -636,31 +818,14 @@ def register_codex_session_routes(
             conversation_store,
         )
         conv = await _require_codex_native_goal_session(session_id, conversation_store)
-        runner_payload = _require_codex_goal_runner_payload(
-            session_id,
-            action="update status",
-            runner_result=await _forward_codex_goal_event(
-                session_id=session_id,
-                conv=conv,
-                event={"type": "goal_status", "status": body.status},
-                request=request,
+        return _legacy_goal_response(
+            await adapter.update_status(
+                request,
+                conv,
                 user_id=user_id,
-                runner_router=runner_router,
-                conversation_store=conversation_store,
-                permission_store=permission_store,
-                runner_exit_reports=runner_exit_reports,
-            ),
-        )
-        if isinstance(runner_payload, JSONResponse):
-            return runner_payload
-        try:
-            return CodexGoalResponse.model_validate(runner_payload)
-        except ValueError as exc:
-            del exc
-            return _codex_goal_error(
-                502,
-                detail="Could not update Codex goal status: runner returned a malformed response.",
+                status=body.status,
             )
+        )
 
     @router.delete(
         "/sessions/{session_id}/codex_goal",
@@ -689,28 +854,4 @@ def register_codex_session_routes(
             conversation_store,
         )
         conv = await _require_codex_native_goal_session(session_id, conversation_store)
-        runner_payload = _require_codex_goal_runner_payload(
-            session_id,
-            action="clear",
-            runner_result=await _forward_codex_goal_event(
-                session_id=session_id,
-                conv=conv,
-                event={"type": "goal_clear"},
-                request=request,
-                user_id=user_id,
-                runner_router=runner_router,
-                conversation_store=conversation_store,
-                permission_store=permission_store,
-                runner_exit_reports=runner_exit_reports,
-            ),
-        )
-        if isinstance(runner_payload, JSONResponse):
-            return runner_payload
-        try:
-            return ClearCodexGoalResponse.model_validate(runner_payload)
-        except ValueError as exc:
-            del exc
-            return _codex_goal_error(
-                502,
-                detail="Could not clear Codex goal: runner returned a malformed response.",
-            )
+        return _legacy_clear_response(await adapter.clear(request, conv, user_id=user_id))
