@@ -173,6 +173,17 @@ PROVIDERS_WITH_MANAGED_LAUNCH: frozenset[str] = frozenset(
 MANAGED_HOST_ONLINE_TIMEOUT_S = 120
 _ONLINE_POLL_INTERVAL_S = 1.0
 
+# Bounded retry for the provider-side sandbox terminate on the cleanup path.
+# The terminate call can fail transiently — a channel blip, a provider 5xx, a
+# not-yet-settled sandbox — and until it succeeds the sandbox keeps running
+# (and, for quota-bearing providers, keeps consuming quota) after its session
+# and host row are gone, with nothing left pointing at it to retry. So retry a
+# few times with linear backoff before giving up, and when we do give up, log
+# an ERROR loud enough to alert/grep on rather than a warning that reads as
+# routine. Small + bounded: teardown must not block on a wedged provider.
+_TERMINATE_MAX_ATTEMPTS = 3
+_TERMINATE_RETRY_BACKOFF_S = 2.0
+
 # Launch-token lifetime for the YAML modal path: Modal's 24h sandbox
 # cap plus an hour of slack, so a live sandbox can always
 # re-authenticate its tunnel across reconnects, while a token leaked
@@ -2359,27 +2370,68 @@ async def _terminate_sandbox_best_effort(
         launcher is available (logged, nothing terminated).
     :param host: The host whose ``sandbox_id`` names the sandbox.
     """
-    if launcher is not None and host.sandbox_id is not None:
-        try:
-            await asyncio.to_thread(launcher.terminate, host.sandbox_id)
-        except Exception:  # noqa: BLE001 — deliberate broad catch: this is a
-            # provider-API boundary on a cleanup path. The provider SDK can
-            # fail here in many shapes (auth/config ClickException, network
-            # errors, SDK-internal exceptions), the sandbox may already be
-            # gone past its lifetime cap, and NONE of those may block the
-            # caller's remaining cleanup (deleting the host row / revoking
-            # the launch token), which only we can do.
-            _logger.warning(
-                "Failed to terminate managed sandbox %s (provider=%s) for host %s",
-                host.sandbox_id,
-                host.sandbox_provider,
-                host.host_id,
-                exc_info=True,
-            )
-    else:
+    if launcher is None or host.sandbox_id is None:
         _logger.warning(
             "No launcher available for managed sandbox provider %s; "
             "sandbox %s must be deleted with the provider's own tooling",
             host.sandbox_provider,
             host.sandbox_id,
         )
+        return
+
+    from omnigent.onboarding.sandboxes.base import SandboxCapabilityError
+
+    # Retry the provider terminate before giving up. A single swallowed failure
+    # here orphans the sandbox: the caller deletes the host row next, after which
+    # nothing points at the sandbox and no later session-delete can ever reach
+    # it — it runs (and, for quota-bearing providers, holds quota) until an
+    # out-of-band sweep reclaims it. Retrying rescues the common transient case
+    # (channel blip, provider 5xx, not-yet-settled sandbox).
+    for attempt in range(1, _TERMINATE_MAX_ATTEMPTS + 1):
+        try:
+            await asyncio.to_thread(launcher.terminate, host.sandbox_id)
+            return
+        except SandboxCapabilityError:
+            # The provider has no programmatic terminate — retrying can't help
+            # and this is expected for such providers; the row-delete /
+            # token-revoke the caller does next is the whole teardown. Not an
+            # error.
+            _logger.info(
+                "Managed sandbox provider %s does not support programmatic "
+                "termination; sandbox %s left to the provider's own tooling",
+                host.sandbox_provider,
+                host.sandbox_id,
+            )
+            return
+        except Exception:  # deliberate broad catch: this is a
+            # provider-API boundary on a cleanup path. The provider SDK can fail
+            # here in many shapes (auth/config ClickException, network errors,
+            # SDK-internal exceptions); none may block the caller's remaining
+            # cleanup, which only we can do. Retry, then report loudly.
+            if attempt < _TERMINATE_MAX_ATTEMPTS:
+                _logger.warning(
+                    "Failed to terminate managed sandbox %s (provider=%s) for host %s "
+                    "on attempt %d/%d; retrying",
+                    host.sandbox_id,
+                    host.sandbox_provider,
+                    host.host_id,
+                    attempt,
+                    _TERMINATE_MAX_ATTEMPTS,
+                    exc_info=True,
+                )
+                await asyncio.sleep(_TERMINATE_RETRY_BACKOFF_S * attempt)
+            else:
+                # Exhausted retries: the sandbox is now an orphan (the caller
+                # deletes the host row next). Log ERROR — not warning — so this
+                # is alertable/greppable, since only an out-of-band sweep can
+                # reclaim it from here.
+                _logger.error(
+                    "Failed to terminate managed sandbox %s (provider=%s) for host %s "
+                    "after %d attempts; sandbox is orphaned and must be reclaimed "
+                    "out of band",
+                    host.sandbox_id,
+                    host.sandbox_provider,
+                    host.host_id,
+                    _TERMINATE_MAX_ATTEMPTS,
+                    exc_info=True,
+                )

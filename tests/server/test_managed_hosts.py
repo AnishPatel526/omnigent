@@ -16,6 +16,7 @@ from omnigent.db.utils import now_epoch
 from omnigent.onboarding.sandboxes.base import render_host_config_write_command
 from omnigent.onboarding.sandboxes.e2b import managed_token_ttl_s as e2b_managed_token_ttl_s
 from omnigent.runtime.agent_cache import AgentCache
+from omnigent.server import managed_hosts
 from omnigent.server.app import create_app
 from omnigent.server.managed_hosts import (
     BOXLITE_MANAGED_TOKEN_TTL_S,
@@ -2018,8 +2019,14 @@ async def test_terminate_managed_host_deletes_row_even_when_terminate_fails(
     """
     fake = FakeSandboxLauncher()
 
+    # Zero the retry backoff so the (now-retried) failure path doesn't sleep.
+    monkeypatch.setattr(managed_hosts, "_TERMINATE_RETRY_BACKOFF_S", 0.0)
+    attempts = 0
+
     def _explode(sandbox_id: str) -> None:
         """Simulate a provider API failure during termination."""
+        nonlocal attempts
+        attempts += 1
         raise click.ClickException("provider unavailable")
 
     monkeypatch.setattr(fake, "terminate", _explode)
@@ -2036,10 +2043,82 @@ async def test_terminate_managed_host_deletes_row_even_when_terminate_fails(
 
     await terminate_managed_host(host, host_store, _injected_config(fake))
 
+    # Retried up to the cap before giving up, then deleted the row anyway.
+    assert attempts == managed_hosts._TERMINATE_MAX_ATTEMPTS
     assert host_store.get_host("057e7fa3f1cdb40c0ec393a3d42affc7") is None
     assert (
         host_store.resolve_launch_token("057e7fa3f1cdb40c0ec393a3d42affc7", "tok-term-2") is None
     )
+
+
+async def test_terminate_managed_host_retries_then_succeeds(
+    db_uri: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    A transient provider failure is retried; a later attempt that
+    succeeds terminates the sandbox (no orphan, no ERROR).
+    """
+    monkeypatch.setattr(managed_hosts, "_TERMINATE_RETRY_BACKOFF_S", 0.0)
+    fake = FakeSandboxLauncher()
+    calls: list[str] = []
+
+    def _flaky(sandbox_id: str) -> None:
+        calls.append(sandbox_id)
+        if len(calls) == 1:
+            raise click.ClickException("transient channel blip")
+
+    monkeypatch.setattr(fake, "terminate", _flaky)
+    host_store = HostStore(db_uri)
+    host = host_store.register_managed_host(
+        host_id="a1a2a3a4a5a6a7a8a9a0b1b2b3b4b5b6",
+        name="managed-term-flaky",
+        user_id=_OWNER,
+        token="tok-term-flaky",
+        provider="modal",
+        sandbox_id="sb-term-flaky",
+        token_expires_at=now_epoch() + 3600,
+    )
+
+    await terminate_managed_host(host, host_store, _injected_config(fake))
+
+    assert calls == ["sb-term-flaky", "sb-term-flaky"]  # failed once, retried, succeeded
+    assert host_store.get_host("a1a2a3a4a5a6a7a8a9a0b1b2b3b4b5b6") is None
+
+
+async def test_terminate_managed_host_does_not_retry_capability_error(
+    db_uri: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    A provider with no programmatic terminate (``SandboxCapabilityError``)
+    is not retried — the row-delete/token-revoke is the whole teardown.
+    """
+    from omnigent.onboarding.sandboxes.base import SandboxCapabilityError
+
+    monkeypatch.setattr(managed_hosts, "_TERMINATE_RETRY_BACKOFF_S", 0.0)
+    fake = FakeSandboxLauncher()
+    calls = 0
+
+    def _unsupported(sandbox_id: str) -> None:
+        nonlocal calls
+        calls += 1
+        raise SandboxCapabilityError("no programmatic terminate")
+
+    monkeypatch.setattr(fake, "terminate", _unsupported)
+    host_store = HostStore(db_uri)
+    host = host_store.register_managed_host(
+        host_id="c1c2c3c4c5c6c7c8c9c0d1d2d3d4d5d6",
+        name="managed-term-cap",
+        user_id=_OWNER,
+        token="tok-term-cap",
+        provider="modal",
+        sandbox_id="sb-term-cap",
+        token_expires_at=now_epoch() + 3600,
+    )
+
+    await terminate_managed_host(host, host_store, _injected_config(fake))
+
+    assert calls == 1  # not retried
+    assert host_store.get_host("c1c2c3c4c5c6c7c8c9c0d1d2d3d4d5d6") is None
 
 
 async def test_terminate_managed_host_skips_mismatched_provider(db_uri: str) -> None:
