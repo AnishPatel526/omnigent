@@ -33,7 +33,7 @@ import threading
 import time
 import uuid
 from pathlib import Path
-from typing import IO
+from typing import IO, NamedTuple
 
 import httpx
 import yaml
@@ -84,6 +84,25 @@ _DEFAULT_HARNESS = "openai-agents"
 _POLICY_LLM_KEY = "_policy_llm_"
 _POLICY_ALLOW = '{"action": "allow", "reason": ""}'
 
+# Dotted path to the CI-only debug router (under ``dev/``, never shipped in the
+# wheel). The server loads it via the ``debug_router_modules`` config key to
+# expose ``GET /debug/server-metrics`` for per-journey request counting.
+_DEBUG_ROUTER_MODULE = "dev.benchmarks.omnigent.debug_router"
+_SERVER_METRICS_PATH = "/debug/server-metrics"
+
+
+class ServerRequestSnapshot(NamedTuple):
+    """A point-in-time read of the server's cumulative request counters.
+
+    :param total: ``total_started`` — every HTTP request the server has handled
+        since process start.
+    :param routes: ``"METHOD /route/{template}"`` mapped to its cumulative
+        count, for attributing a journey's requests to specific endpoints.
+    """
+
+    total: int
+    routes: dict[str, int]
+
 
 def _find_free_port() -> int:
     """Bind an ephemeral port and return it (races are tolerated by retries)."""
@@ -126,6 +145,11 @@ class BenchEnvironment:
     :param harness: Harness for full-turn agents when ``with_runner`` (default
         ``openai-agents``, a base dependency needing no vendor CLI binary).
     :param model: Model string baked into registered agent specs.
+    :param network_delay_ms: Artificial latency in milliseconds injected before
+        every request the benchmark client sends to the server, modelling a
+        real client↔server network hop that loopback lacks. ``0`` (default)
+        adds no delay. Combined with per-op request counts, it turns each
+        journey's round-trip count into wall-clock cost.
     """
 
     def __init__(
@@ -136,6 +160,7 @@ class BenchEnvironment:
         database_uri: str | None = None,
         harness: str = _DEFAULT_HARNESS,
         model: str = _DEFAULT_MODEL,
+        network_delay_ms: float = 0.0,
     ) -> None:
         # with_host is additive over with_runner: the boot runner still serves
         # the warm journeys, and the host daemon additionally lets the cold-start
@@ -145,6 +170,7 @@ class BenchEnvironment:
         self.database_uri = database_uri
         self.harness = harness
         self.model = model
+        self.network_delay_ms = network_delay_ms
         self.base_url = ""
         self.mock_url = ""
         self.runner_id = ""
@@ -170,10 +196,22 @@ class BenchEnvironment:
 
     async def __aenter__(self) -> BenchEnvironment:
         await asyncio.to_thread(self._start)
+        # A request event hook injects the simulated client↔server network
+        # delay before each request leaves the benchmark process. Registered
+        # only when a delay is set so the zero-delay default path is untouched.
+        event_hooks: dict[str, list[object]] = {}
+        if self.network_delay_ms > 0:
+            delay_s = self.network_delay_ms / 1000.0
+
+            async def _delay_request(_request: httpx.Request) -> None:
+                await asyncio.sleep(delay_s)
+
+            event_hooks["request"] = [_delay_request]
         self.client = httpx.AsyncClient(
             base_url=self.base_url,
             timeout=300.0,
             headers={"Origin": OMNIGENT_INTERNAL_WS_ORIGIN},
+            event_hooks=event_hooks,  # type: ignore[arg-type]
         )
         # Start background resource sampler (server CPU + memory).
         self._sampler_thread = threading.Thread(target=self._sample_resources, daemon=True)
@@ -314,6 +352,41 @@ class BenchEnvironment:
             },
         }
 
+    async def server_request_snapshot(self) -> ServerRequestSnapshot:
+        """Read the server's cumulative request counters (total + per-route).
+
+        Reads the CI-only ``GET /debug/server-metrics`` endpoint the server
+        mounts from ``debug_router_modules``. The counters are monotonic since
+        the server process started; callers diff two reads to get the requests
+        the server handled during a window — including cross-process traffic
+        (runner → server callbacks, host → server) invisible to a client-side
+        hook in the benchmark process.
+
+        The count-poll request itself hits the server, so it increments the
+        counters; the caller accounts for its own polls when computing per-op
+        volume. Uses a short-lived client so it never carries the simulated
+        network delay wired onto ``self.client``.
+
+        :returns: A :class:`ServerRequestSnapshot` of ``total_started`` and the
+            per-route breakdown.
+        :raises RuntimeError: If the debug endpoint is unreachable, which means
+            the debug router did not load (a benchmark misconfiguration).
+        """
+        try:
+            async with httpx.AsyncClient(base_url=self.base_url, timeout=10.0) as client:
+                resp = await client.get(_SERVER_METRICS_PATH)
+                resp.raise_for_status()
+        except httpx.HTTPError as exc:
+            raise RuntimeError(
+                f"server debug metrics endpoint {_SERVER_METRICS_PATH} unreachable "
+                f"({exc!r}); is the debug router loaded? logs in {self._tmp}"
+            ) from exc
+        body = resp.json()
+        return ServerRequestSnapshot(
+            total=int(body["total_started"]),
+            routes={str(k): int(v) for k, v in body.get("route_counts", {}).items()},
+        )
+
     # ── spawns ───────────────────────────────────────────────
 
     def _log(self, name: str) -> IO[bytes]:
@@ -351,27 +424,24 @@ class BenchEnvironment:
             str(artifact_dir),
         ]
         env = {**base_env}
+        # The server always boots with a config that loads the CI-only debug
+        # router (exposing its request counter over HTTP for per-journey network
+        # counting). In runner mode it additionally routes the server-side
+        # policy-classifier LLM at the mock, mirroring live_server — without
+        # that the classifier's client defaults to api.openai.com and errors.
+        server_config: dict[str, object] = {"debug_router_modules": [_DEBUG_ROUTER_MODULE]}
         if self.with_runner:
-            # Route the server-side policy-classifier LLM at the mock, mirroring
-            # live_server. Without this the classifier's client defaults to
-            # api.openai.com and errors. Server-only mode needs no llm config —
-            # the classifier only builds under OMNIGENT_SMART_ROUTING=1.
-            server_cfg = self._tmp / "server.yaml"
-            server_cfg.write_text(
-                yaml.safe_dump(
-                    {
-                        "llm": {
-                            "model": _POLICY_LLM_KEY,
-                            "connection": {
-                                "base_url": f"{self.mock_url}/v1",
-                                "api_key": "mock-key",
-                            },
-                        }
-                    }
-                )
-            )
-            args.extend(["--config", str(server_cfg)])
+            server_config["llm"] = {
+                "model": _POLICY_LLM_KEY,
+                "connection": {
+                    "base_url": f"{self.mock_url}/v1",
+                    "api_key": "mock-key",
+                },
+            }
             env["OMNIGENT_RUNNER_TUNNEL_TOKEN"] = binding_token
+        server_cfg = self._tmp / "server.yaml"
+        server_cfg.write_text(yaml.safe_dump(server_config))
+        args.extend(["--config", str(server_cfg)])
         return subprocess.Popen(
             args,
             env=env,
