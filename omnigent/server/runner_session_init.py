@@ -131,8 +131,6 @@ class RunnerSessionInitializer:
             if agent is None:
                 return None
             contents = self._artifact_store.get(agent.bundle_location)
-            if contents is None:
-                return None
             bundle = encode_runner_session_init_agent_bundle(
                 contents,
                 version=str(agent.version),

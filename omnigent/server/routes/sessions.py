@@ -20843,11 +20843,6 @@ def create_sessions_router(
                     code=ErrorCode.RUNNER_UNAVAILABLE,
                 ) from exc
             return {"queued": True, "item_id": body.data["call_id"]}
-        # Whether the runner was initially unavailable or was woken below. In
-        # that case the session-init handshake may still be racing the first
-        # message, even if we reused the original binding instead of launching
-        # a replacement.
-        _runner_needs_session_init = False
         # Item event (message, function_call_output, etc.).
         if conv.host_id is not None and await _maybe_wake_stale_resumable_managed_sandbox(
             session_id=session_id,
@@ -20864,7 +20859,6 @@ def create_sessions_router(
             if conv_after_wake is None:
                 raise _session_not_found()
             conv = conv_after_wake
-            _runner_needs_session_init = True
         runner_client = await _get_runner_client(session_id, runner_router)
         # Managed-launch rendezvous: a ``host_type="managed"`` create
         # returns before the sandbox exists, so the first message (the
@@ -21014,10 +21008,6 @@ def create_sessions_router(
                     timeout_s=_HOST_RELAUNCH_RUNNER_CONNECT_TIMEOUT_S,
                     runner_exit_reports=runner_exit_reports,
                 )
-            if runner_client is None:
-                _runner_needs_session_init = False
-            else:
-                _runner_needs_session_init = True
         if runner_client is None:
             # A native terminal-session message must NOT be silently
             # dropped when no runner is reachable — the runner crashed
@@ -21073,22 +21063,16 @@ def create_sessions_router(
         if refreshed_conv is None:
             raise _session_not_found()
         conv = refreshed_conv
-        native_terminal_ready = False
-        if _runner_needs_session_init:
-            # The runner was unavailable when this request began, so its
-            # connect callback may still be racing us. Await the handshake
-            # so the terminal + transcript forwarder are watching before we
-            # inject the message — otherwise a native web message is
-            # forwarded into a TUI whose forwarder isn't attached, the
-            # round-trip never mirrors back, and the optimistic bubble
-            # sticks with no reply (host-restart bug).
-            native_terminal_ready = await _ensure_runner_session_initialized(
-                session_id,
-                conv,
-                runner_client,
-                conversation_store,
-                initializer=getattr(request.app.state, "runner_session_initializer", None),
-            )
+        # Tunnel registration precedes its connection callback. Always cross
+        # the generation-aware initialization barrier before forwarding so a
+        # newly visible runner cannot race its session assignment.
+        native_terminal_ready = await _ensure_runner_session_initialized(
+            session_id,
+            conv,
+            runner_client,
+            conversation_store,
+            initializer=getattr(request.app.state, "runner_session_initializer", None),
+        )
         await _ensure_runner_relay_ready(
             session_id,
             conv.runner_id,

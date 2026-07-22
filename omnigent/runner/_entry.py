@@ -902,7 +902,7 @@ def _materialize_agent_spec_bundle(
     # sub-agents using harnesses it does not yet understand instead of failing
     # the entire parent-agent dispatch.
     if not dest.exists():
-        dest.mkdir(parents=True)
+        dest.mkdir(parents=True, exist_ok=True)
         try:
             load(contents, dest=dest, expand_env=expand_env, prune_invalid_sub_agents=True)
         except Exception:
