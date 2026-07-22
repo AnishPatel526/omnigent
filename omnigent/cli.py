@@ -126,6 +126,7 @@ def _build_external_routing_client(
     router_name = (routing_cfg.get("router_name") or "").strip()
     api_key = (routing_cfg.get("api_key") or "").strip()
     profile = (routing_cfg.get("profile") or "").strip()
+    traffic_id = (routing_cfg.get("traffic_id") or "").strip()
     model_prefixes = _parse_model_prefixes(routing_cfg.get("model_prefix"))
 
     if not base_url or not router_name:
@@ -164,6 +165,7 @@ def _build_external_routing_client(
         router_name=router_name,
         auth=auth,
         model_prefixes=model_prefixes,
+        traffic_id=traffic_id or None,
     )
 
 

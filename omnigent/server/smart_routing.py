@@ -361,6 +361,7 @@ class ExternalRoutingClient:
         router_name: str,
         auth: Any = None,  # type: ignore[explicit-any]  # httpx.Auth, imported lazily
         model_prefixes: list[str] | None = None,
+        traffic_id: str | None = None,
         request_timeout: float = 20.0,
     ) -> None:
         """
@@ -380,6 +381,9 @@ class ExternalRoutingClient:
             foundation-model ids like ``system.ai.claude-opus-4-8``. Empty
             or omitted (default) sends catalog ids verbatim — no provider
             assumed.
+        :param traffic_id: Optional ``x-databricks-traffic-id`` header value,
+            e.g. ``"testenv://liteswap/lilly-router-3"`` to steer the request
+            at a LiteSwap deployment of the router. Omitted → no header sent.
         :param request_timeout: Per-call timeout in seconds; routing
             runs once per turn so a slow router can't stall forever.
         """
@@ -387,6 +391,7 @@ class ExternalRoutingClient:
         self._router_name = router_name
         self._auth = auth
         self._model_prefixes = model_prefixes or []
+        self._traffic_id = traffic_id or None
         self._request_timeout = request_timeout
 
     def _to_router_id(self, model: str) -> str:
@@ -430,13 +435,16 @@ class ExternalRoutingClient:
         )
         # snake_case wire format — the router uses the proto field names.
         body = json_format.MessageToDict(request, preserving_proto_field_name=True)
+        headers = {"Content-Type": "application/json"}
+        if self._traffic_id:
+            headers["x-databricks-traffic-id"] = self._traffic_id
         _logger.info("ExternalRoutingClient: available_models=%s", dict(available_models))
         _logger.info("ExternalRoutingClient: POST %s body=%s", self._url, body)
         try:
             async with httpx.AsyncClient(timeout=self._request_timeout) as http:
                 resp = await http.post(
                     self._url,
-                    headers={"Content-Type": "application/json"},
+                    headers=headers,
                     json=body,
                     auth=self._auth,
                 )
