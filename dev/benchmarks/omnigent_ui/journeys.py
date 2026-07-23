@@ -11,8 +11,8 @@ tallies each timed rep's network requests (see :mod:`netcapture`).
 Isolation is per journey:
 
 - ``fresh_context`` — a new browser context + page per rep, so cold-visit
-  journeys (``landing_load``, ``new_session_first_token``) measure a true first
-  paint. Prerequisite sessions are created (untimed) in ``prepare``.
+  journeys (``landing_load``, ``warm_session_first_token``) isolate cache and
+  storage. Prerequisite sessions are created (untimed) in ``prepare``.
 - ``shared_page`` — one page reused across a journey's reps, so JS module state
   survives. ``switch_sessions`` needs this: switching is client-side navigation
   via the sidebar link, and a full reload would reset the store.
@@ -20,8 +20,8 @@ Isolation is per journey:
 The four journeys:
 
 - ``landing_load`` — navigate to ``/`` and wait for the landing composer.
-- ``new_session_first_token`` — on a fresh bound session, type into the
-  in-session composer and time to the first streamed assistant token.
+- ``warm_session_first_token`` — on a fresh session bound to the warm runner,
+  click Send on a prepared prompt and time to the first rendered assistant token.
 - ``switch_sessions`` — click between two seeded sessions in the sidebar
   (client-side) and time to the target conversation rendering.
 - ``fork_session`` — fork from an assistant response and time to the forked
@@ -96,6 +96,7 @@ class UIJourney:
     :param prepare: Coroutine run before every rep, OUTSIDE the timer, to
         position the page at the journey's starting state.
     :param teardown: Coroutine run once after timing, given ``ctx``.
+    :param cleanup: Coroutine run after every repetition, outside the timer.
     :param capture_nav_timing: Read Navigation Timing + FCP after each timed
         rep (only meaningful for journeys whose ``measure`` is a navigation).
     :param max_iterations: Upper bound clamping ``--iterations`` down (never up).
@@ -108,6 +109,7 @@ class UIJourney:
     setup: Callable[[UIEnvironment], Awaitable[JourneyContext]] | None = None
     prepare: Callable[[UIEnvironment, Page, JourneyContext], Awaitable[None]] | None = None
     teardown: Callable[[UIEnvironment, JourneyContext], Awaitable[None]] | None = None
+    cleanup: Callable[[UIEnvironment, Page, JourneyContext], Awaitable[None]] | None = None
     capture_nav_timing: bool = False
     max_iterations: int = _UI_MAX_ITERATIONS
     description: str = ""
@@ -122,6 +124,10 @@ class UIJourney:
     async def run_teardown(self, env: UIEnvironment, ctx: JourneyContext) -> None:
         if self.teardown is not None:
             await self.teardown(env, ctx)
+
+    async def run_cleanup(self, env: UIEnvironment, page: Page, ctx: JourneyContext) -> None:
+        if self.cleanup is not None:
+            await self.cleanup(env, page, ctx)
 
 
 @dataclass
@@ -160,6 +166,8 @@ async def _one_rep(
         try:
             await journey.run_prepare(env, page, ctx)
         except Exception as exc:  # noqa: BLE001 — a prepare failure is a data point
+            with contextlib.suppress(Exception):
+                await env.capture_failure(page, journey.name)
             if sink is not None:
                 sink.result.record_failure(f"prepare:{exc.__class__.__name__}")
             return
@@ -170,6 +178,8 @@ async def _one_rep(
             await journey.measure(env, page, ctx)
         except Exception as exc:  # noqa: BLE001 — any measure failure is recorded
             netcap.stop()
+            with contextlib.suppress(Exception):
+                await env.capture_failure(page, journey.name)
             if sink is not None:
                 sink.result.record_failure(exc.__class__.__name__)
             return
@@ -184,6 +194,14 @@ async def _one_rep(
                 if timing is not None:
                     sink.timings.append(timing)
     finally:
+        try:
+            await journey.run_cleanup(env, page, ctx)
+        except Exception as exc:  # noqa: BLE001 — cleanup drift invalidates the sample
+            with contextlib.suppress(Exception):
+                await env.capture_failure(page, journey.name)
+            if sink is not None:
+                sink.result.record_failure(f"cleanup:{exc.__class__.__name__}")
+        netcap.stop()
         if page_ctx is not None:
             await driver.close_context(page_ctx)
 
@@ -249,12 +267,19 @@ async def _ensure_streaming_reply(env: UIEnvironment) -> None:
     await env.set_mock_fallback(_REPLY_TEXT, stream=True)
 
 
-async def _delete_sessions(env: UIEnvironment, ids: list[str]) -> None:
-    """Best-effort DELETE of sessions created during a run (untimed teardown)."""
+async def _delete_sessions(
+    env: UIEnvironment, ids: list[str], *, best_effort: bool = True
+) -> None:
+    """Delete sessions created during a run, optionally suppressing failures."""
     assert env.client is not None
     for sid in ids:
-        with contextlib.suppress(httpx.HTTPError):
-            await env.client.delete(f"/v1/sessions/{sid}")
+        try:
+            response = await env.client.delete(f"/v1/sessions/{sid}")
+            if response.status_code != 404:
+                response.raise_for_status()
+        except httpx.HTTPError:
+            if not best_effort:
+                raise
 
 
 # ── journey 1: landing page load ─────────────────────────────
@@ -275,6 +300,7 @@ class _FirstTokenCtx:
 
     agent_id: str
     created_ids: list[str] = field(default_factory=list)
+    active_id: str | None = None
 
 
 async def _setup_first_token(env: UIEnvironment) -> _FirstTokenCtx:
@@ -289,10 +315,12 @@ async def _prepare_first_token(env: UIEnvironment, page: Page, ctx: JourneyConte
     fc = cast(_FirstTokenCtx, ctx)
     session_id = await env.create_bound_session(fc.agent_id)
     fc.created_ids.append(session_id)
+    fc.active_id = session_id
     await page.goto(f"/c/{session_id}", wait_until="commit")
     await expect(page.get_by_placeholder(COMPOSER_PLACEHOLDER)).to_be_visible(
         timeout=_ASSERT_TIMEOUT_MS
     )
+    await page.get_by_placeholder(COMPOSER_PLACEHOLDER).fill(_TURN_PROMPT)
 
 
 async def _measure_first_token(_env: UIEnvironment, page: Page, _ctx: JourneyContext) -> None:
@@ -302,8 +330,6 @@ async def _measure_first_token(_env: UIEnvironment, page: Page, _ctx: JourneyCon
     ``working-indicator`` shimmer (which would let the timer stop on the spinner
     before any token streamed).
     """
-    composer = page.get_by_placeholder(COMPOSER_PLACEHOLDER)
-    await composer.fill(_TURN_PROMPT)
     await page.get_by_role("button", name=SEND_BUTTON_NAME, exact=True).click()
     assistant = page.locator(ASSISTANT_BUBBLE).first
     await expect(assistant).to_be_visible(timeout=_FIRST_TOKEN_TIMEOUT_MS)
@@ -312,6 +338,17 @@ async def _measure_first_token(_env: UIEnvironment, page: Page, _ctx: JourneyCon
 
 async def _teardown_first_token(env: UIEnvironment, ctx: JourneyContext) -> None:
     await _delete_sessions(env, cast(_FirstTokenCtx, ctx).created_ids)
+
+
+async def _cleanup_first_token(env: UIEnvironment, _page: Page, ctx: JourneyContext) -> None:
+    fc = cast(_FirstTokenCtx, ctx)
+    if fc.active_id is None:
+        return
+    session_id = fc.active_id
+    await _delete_sessions(env, [session_id], best_effort=False)
+    fc.active_id = None
+    with contextlib.suppress(ValueError):
+        fc.created_ids.remove(session_id)
 
 
 # ── journey 3: switch between sessions (client-side) ─────────
@@ -323,6 +360,8 @@ class _SwitchCtx:
 
     session_a: str
     session_b: str
+    marker_a: str
+    marker_b: str
 
 
 async def _setup_switch(env: UIEnvironment) -> _SwitchCtx:
@@ -330,9 +369,16 @@ async def _setup_switch(env: UIEnvironment) -> _SwitchCtx:
     agent_id = await _setup_agent(env)
     session_a = await env.create_bound_session(agent_id)
     session_b = await env.create_bound_session(agent_id)
-    await env.seed_items(session_a, _SWITCH_SEED_ITEMS)
-    await env.seed_items(session_b, _SWITCH_SEED_ITEMS)
-    return _SwitchCtx(session_a=session_a, session_b=session_b)
+    prefix_a = "benchmark switch A item"
+    prefix_b = "benchmark switch B item"
+    await env.seed_items(session_a, _SWITCH_SEED_ITEMS, text_prefix=prefix_a)
+    await env.seed_items(session_b, _SWITCH_SEED_ITEMS, text_prefix=prefix_b)
+    return _SwitchCtx(
+        session_a=session_a,
+        session_b=session_b,
+        marker_a=f"{prefix_a} {_SWITCH_SEED_ITEMS - 1}",
+        marker_b=f"{prefix_b} {_SWITCH_SEED_ITEMS - 1}",
+    )
 
 
 async def _prepare_switch(_env: UIEnvironment, page: Page, ctx: JourneyContext) -> None:
@@ -349,6 +395,9 @@ async def _prepare_switch(_env: UIEnvironment, page: Page, ctx: JourneyContext) 
     await page.wait_for_url(
         re.compile(rf"/c/{re.escape(sc.session_a)}"), timeout=_ASSERT_TIMEOUT_MS
     )
+    await expect(page.locator(USER_BUBBLE, has_text=sc.marker_a)).to_be_visible(
+        timeout=_ASSERT_TIMEOUT_MS
+    )
     await expect(page.locator(sidebar_session_link(sc.session_b))).to_be_visible(
         timeout=_ASSERT_TIMEOUT_MS
     )
@@ -361,7 +410,9 @@ async def _measure_switch(_env: UIEnvironment, page: Page, ctx: JourneyContext) 
     await page.wait_for_url(
         re.compile(rf"/c/{re.escape(sc.session_b)}"), timeout=_ASSERT_TIMEOUT_MS
     )
-    await expect(page.locator(USER_BUBBLE).first).to_be_visible(timeout=_ASSERT_TIMEOUT_MS)
+    await expect(page.locator(USER_BUBBLE, has_text=sc.marker_b)).to_be_visible(
+        timeout=_ASSERT_TIMEOUT_MS
+    )
 
 
 async def _teardown_switch(env: UIEnvironment, ctx: JourneyContext) -> None:
@@ -377,7 +428,9 @@ class _ForkCtx:
     """Fork-journey context: the source session + the forks to clean up."""
 
     source_id: str
+    expected_fork_title: str
     fork_ids: list[str] = field(default_factory=list)
+    active_fork_id: str | None = None
 
 
 async def _setup_fork(env: UIEnvironment) -> _ForkCtx:
@@ -385,8 +438,15 @@ async def _setup_fork(env: UIEnvironment) -> _ForkCtx:
     await _ensure_streaming_reply(env)
     agent_id = await _setup_agent(env)
     source_id = await env.create_bound_session(agent_id)
+    source_title = "UI benchmark fork source"
     await env.drive_turn(source_id, _TURN_PROMPT)
-    return _ForkCtx(source_id=source_id)
+    assert env.client is not None
+    renamed = await env.client.patch(f"/v1/sessions/{source_id}", json={"title": source_title})
+    renamed.raise_for_status()
+    return _ForkCtx(
+        source_id=source_id,
+        expected_fork_title=f"Fork of {source_title}",
+    )
 
 
 async def _prepare_fork(_env: UIEnvironment, page: Page, ctx: JourneyContext) -> None:
@@ -410,9 +470,37 @@ async def _measure_fork(_env: UIEnvironment, page: Page, ctx: JourneyContext) ->
         re.compile(rf"/c/(?!{re.escape(fc.source_id)})[0-9a-f]{{32}}"),
         timeout=_ASSERT_TIMEOUT_MS,
     )
-    await expect(page.locator(USER_BUBBLE).first).to_be_visible(timeout=_ASSERT_TIMEOUT_MS)
     fork_id = page.url.rsplit("/c/", 1)[1].split("?", 1)[0]
     fc.fork_ids.append(fork_id)
+    fc.active_fork_id = fork_id
+    await expect(page).to_have_title(fc.expected_fork_title, timeout=_ASSERT_TIMEOUT_MS)
+
+
+async def _cleanup_fork(env: UIEnvironment, page: Page, ctx: JourneyContext) -> None:
+    fc = cast(_ForkCtx, ctx)
+    fork_id = fc.active_fork_id
+    if fork_id is None and "/c/" in page.url:
+        candidate = page.url.rsplit("/c/", 1)[1].split("?", 1)[0]
+        if candidate != fc.source_id:
+            fork_id = candidate
+    if fork_id is None:
+        assert env.client is not None
+        listing = await env.client.get("/v1/sessions", params={"limit": 30, "order": "desc"})
+        listing.raise_for_status()
+        fork_id = next(
+            (
+                str(row["id"])
+                for row in listing.json().get("data", [])
+                if row.get("title") == fc.expected_fork_title and row.get("id") != fc.source_id
+            ),
+            None,
+        )
+    if fork_id is None:
+        return
+    await _delete_sessions(env, [fork_id], best_effort=False)
+    fc.active_fork_id = None
+    with contextlib.suppress(ValueError):
+        fc.fork_ids.remove(fork_id)
 
 
 async def _teardown_fork(env: UIEnvironment, ctx: JourneyContext) -> None:
@@ -433,14 +521,15 @@ ALL_UI_JOURNEYS: dict[str, UIJourney] = {
             description="Navigate to / and wait for the landing composer (cold first paint).",
         ),
         UIJourney(
-            name="new_session_first_token",
+            name="warm_session_first_token",
             isolation="fresh_context",
             setup=_setup_first_token,
             prepare=_prepare_first_token,
             measure=_measure_first_token,
+            cleanup=_cleanup_first_token,
             teardown=_teardown_first_token,
-            description="On a fresh bound session, send a message; time to the first "
-            "streamed assistant token.",
+            description="On a fresh session bound to the warm runner, click Send on a "
+            "prepared prompt; time to the first rendered assistant token.",
         ),
         UIJourney(
             name="switch_sessions",
@@ -458,6 +547,7 @@ ALL_UI_JOURNEYS: dict[str, UIJourney] = {
             setup=_setup_fork,
             prepare=_prepare_fork,
             measure=_measure_fork,
+            cleanup=_cleanup_fork,
             teardown=_teardown_fork,
             description="Fork from an assistant response; time to the forked "
             "conversation rendering.",

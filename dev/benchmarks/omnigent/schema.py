@@ -17,7 +17,7 @@ import subprocess
 # metric keys when every run failed); a journey that errored out of measurement
 # entirely carries ``skipped: true`` + ``error`` with empty ``runs``/``summary``.
 # v5 added the browser UI benchmark (dev/benchmarks/omnigent_ui): its per-journey
-# blocks carry a ``network`` sub-object (and optional ``browser_timing``)
+# blocks carry ``distribution`` / ``network`` sub-objects (and optional ``browser_timing``)
 # alongside the shared ``runs``/``summary`` latency shape, under
 # ``harness="web-ui-playwright"``. HTTP-benchmark reports are unchanged.
 SCHEMA_VERSION = 5

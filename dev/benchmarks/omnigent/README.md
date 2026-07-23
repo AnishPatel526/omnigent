@@ -173,7 +173,7 @@ document without running the harness.
 
 ```jsonc
 {
-  "schema_version": 4,
+  "schema_version": 5,
   "generated_at": "<ISO-8601 UTC>",
   "git_sha": "<HEAD sha>",
   "git_branch": "<branch>",

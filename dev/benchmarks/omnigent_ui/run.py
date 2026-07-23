@@ -37,6 +37,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
 from dev.benchmarks.omnigent.measure import (
+    RunResult,
     aggregate,
     check_thresholds,
     console,
@@ -73,6 +74,78 @@ def _effective_iterations(journey: UIJourney, requested: int) -> int:
     return min(requested, journey.max_iterations)
 
 
+def _aggregate_ui_results(results: list[RunResult]) -> dict[str, object]:
+    """Aggregate UI samples, computing percentiles over the pooled distribution."""
+    block = aggregate(results)
+    samples = [latency for result in results for latency in result.latencies_ms]
+    if not samples:
+        return block
+    pooled = RunResult(latencies_ms=samples)
+    distribution = {
+        "samples": len(samples),
+        "mean_ms": pooled.mean_ms(),
+        "p50_ms": pooled.percentile(50),
+        "p95_ms": pooled.percentile(95),
+        "p99_ms": pooled.percentile(99),
+        "max_ms": pooled.max_ms(),
+    }
+    block["distribution"] = distribution
+    summary = block["summary"]
+    assert isinstance(summary, dict)
+    # Preserve the shared ETL keys while avoiding an average of tiny per-run
+    # percentile estimates. Throughput remains the per-run average.
+    summary.update(
+        {
+            "avg_mean_ms": distribution["mean_ms"],
+            "avg_p50_ms": distribution["p50_ms"],
+            "avg_p95_ms": distribution["p95_ms"],
+            "avg_p99_ms": distribution["p99_ms"],
+        }
+    )
+    return block
+
+
+def _has_failures(results: list[RunResult]) -> bool:
+    """Return whether any timed repetition or cleanup failed."""
+    return any(result.n_failures for result in results)
+
+
+def _pooled_result(results: list[RunResult]) -> list[RunResult]:
+    """Return one result whose latency distribution matches the report summary."""
+    samples = [latency for result in results for latency in result.latencies_ms]
+    if not samples:
+        return results
+    return [RunResult(latencies_ms=samples, wall_time=sum(r.wall_time for r in results))]
+
+
+def _skipped_block(journey: UIJourney, backend: str, exc: Exception) -> dict[str, object]:
+    """Build a report block for a journey that could not produce samples."""
+    return {
+        "kind": "ui-latency",
+        "backend": backend,
+        "runs": [],
+        "summary": {},
+        "network": build_network_block([]),
+        "skipped": True,
+        "error": f"{exc.__class__.__name__}: {exc}",
+        "description": journey.description,
+    }
+
+
+def _positive_int(value: str) -> int:
+    parsed = int(value)
+    if parsed < 1:
+        raise argparse.ArgumentTypeError("must be at least 1")
+    return parsed
+
+
+def _non_negative_int(value: str) -> int:
+    parsed = int(value)
+    if parsed < 0:
+        raise argparse.ArgumentTypeError("must be at least 0")
+    return parsed
+
+
 async def run_benchmark(args: argparse.Namespace) -> tuple[dict[str, object], bool]:
     """Run all selected UI journeys and build the report.
 
@@ -83,34 +156,55 @@ async def run_benchmark(args: argparse.Namespace) -> tuple[dict[str, object], bo
     journey_results: dict[str, dict[str, object]] = {}
     passed = True
     backend = _backend_of(args.database_uri)
+    effective_iterations: dict[str, int] = {}
+    browser_metadata: dict[str, object] = {}
 
-    async with UIEnvironment(database_uri=args.database_uri, skip_build=args.skip_build) as env:
+    async with UIEnvironment(
+        database_uri=args.database_uri,
+        skip_build=args.skip_build,
+        artifacts_dir=args.artifacts_dir,
+    ) as env:
         launch = LaunchOptions.from_env(headed=args.headed)
         async with UIDriver(env.base_url, launch) as driver:
+            browser_metadata = driver.metadata
             for journey in journeys:
                 console.print(f"\n[bold]Benchmarking[/bold] {journey.name} [dim]({backend})[/dim]")
                 iterations = _effective_iterations(journey, args.iterations)
-                results, net_reps, timings = await run_ui_journey(
-                    journey,
-                    env,
-                    driver,
-                    runs=args.runs,
-                    iterations=iterations,
-                    warmup=args.warmup,
-                )
+                effective_iterations[journey.name] = iterations
+                try:
+                    results, net_reps, timings = await run_ui_journey(
+                        journey,
+                        env,
+                        driver,
+                        runs=args.runs,
+                        iterations=iterations,
+                        warmup=args.warmup,
+                    )
+                except Exception as exc:  # noqa: BLE001 — preserve the rest of the suite
+                    console.print(
+                        f"  [red]FAILED:[/red] {journey.name} errored "
+                        f"({exc.__class__.__name__}: {exc}); excluded from summary."
+                    )
+                    journey_results[journey.name] = _skipped_block(journey, backend, exc)
+                    passed = False
+                    continue
                 print_results(journey.name, results)
 
-                block = aggregate(results)
+                block = _aggregate_ui_results(results)
                 block["kind"] = "ui-latency"
                 block["backend"] = backend
+                block["description"] = journey.description
                 block["network"] = build_network_block(net_reps)
                 browser_timing = summarize_browser_timing(timings)
                 if browser_timing:
                     block["browser_timing"] = browser_timing
                 journey_results[journey.name] = block
 
+                if _has_failures(results):
+                    passed = False
+
                 if not check_thresholds(
-                    results,
+                    _pooled_result(results),
                     min_rps=None,
                     max_p50_ms=args.max_p50_ms,
                     max_p99_ms=args.max_p99_ms,
@@ -120,6 +214,7 @@ async def run_benchmark(args: argparse.Namespace) -> tuple[dict[str, object], bo
 
     config = {
         "iterations": args.iterations,
+        "effective_iterations": effective_iterations,
         "runs": args.runs,
         "warmup": args.warmup,
         "with_runner": True,
@@ -127,6 +222,7 @@ async def run_benchmark(args: argparse.Namespace) -> tuple[dict[str, object], bo
         "backend": backend,
         "headed": args.headed,
         "network_grouping": ["resource_type", "method_path"],
+        "browser": browser_metadata,
     }
     generated_at = datetime.datetime.now(datetime.timezone.utc).isoformat()
     report = build_report(
@@ -161,21 +257,21 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     )
     parser.add_argument(
         "--iterations",
-        type=int,
+        type=_positive_int,
         default=8,
         metavar="N",
         help="Timed browser operations per run, clamped per journey (default: 8).",
     )
     parser.add_argument(
         "--runs",
-        type=int,
+        type=_positive_int,
         default=3,
         metavar="N",
         help="Timed runs per journey; results are per-run and averaged (default: 3).",
     )
     parser.add_argument(
         "--warmup",
-        type=int,
+        type=_non_negative_int,
         default=2,
         metavar="N",
         help="Warmup operations discarded before each journey's timed runs (default: 2).",
@@ -199,6 +295,13 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         default=None,
         metavar="FILE",
         help="Write the JSON report to FILE (for CI artifact upload).",
+    )
+    parser.add_argument(
+        "--artifacts-dir",
+        type=Path,
+        default=None,
+        metavar="DIR",
+        help="Save subprocess logs and failure screenshots under DIR.",
     )
     parser.add_argument(
         "--max-p50-ms",

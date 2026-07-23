@@ -4,8 +4,7 @@
 Journeys ask it for a page under one of two isolation modes:
 
 - ``fresh_context`` — a brand-new :class:`BrowserContext` (own cache + storage)
-  per repetition, so cold-visit journeys (landing load, first token) measure a
-  true first paint with nothing warm.
+  per repetition, so navigation/setup starts without browser cache or storage.
 - ``shared_page`` — one long-lived page reused across a journey's reps, so
   journeys that depend on surviving client-side JS state (session switching via
   the sidebar, forking) keep the SPA's in-memory store between reps.
@@ -123,6 +122,17 @@ class UIDriver:
         )
         return self
 
+    @property
+    def metadata(self) -> dict[str, object]:
+        """Browser provenance recorded alongside latency samples."""
+        assert self._browser is not None
+        return {
+            "engine": "chromium",
+            "version": self._browser.version,
+            "headless": not self._options.headed,
+            "viewport": {"width": 1280, "height": 720},
+        }
+
     async def __aexit__(self, *exc: object) -> None:
         for ctx in self._contexts:
             with contextlib.suppress(Exception):  # teardown best-effort
@@ -135,7 +145,10 @@ class UIDriver:
     async def new_context(self) -> BrowserContext:
         """Open a fresh browser context (own cache/storage), tracked for cleanup."""
         assert self._browser is not None
-        ctx = await self._browser.new_context(base_url=self.base_url)
+        ctx = await self._browser.new_context(
+            base_url=self.base_url,
+            viewport={"width": 1280, "height": 720},
+        )
         self._contexts.append(ctx)
         return ctx
 

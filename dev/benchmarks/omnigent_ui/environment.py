@@ -22,10 +22,14 @@ from __future__ import annotations
 
 import subprocess
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import filelock
 
 from dev.benchmarks.omnigent.environment import BenchEnvironment
+
+if TYPE_CHECKING:
+    from playwright.async_api import Page
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 _WEB_DIR = _REPO_ROOT / "web"
@@ -97,6 +101,7 @@ class UIEnvironment(BenchEnvironment):
     :param database_uri: DB the server boots against; ``None`` uses a fresh
         throwaway SQLite file (the empty-DB path).
     :param skip_build: Reuse an existing SPA build instead of rebuilding.
+    :param artifacts_dir: Optional directory for subprocess logs and screenshots.
     """
 
     def __init__(
@@ -104,9 +109,16 @@ class UIEnvironment(BenchEnvironment):
         *,
         database_uri: str | None = None,
         skip_build: bool = False,
+        artifacts_dir: Path | None = None,
     ) -> None:
-        super().__init__(with_runner=True, with_host=False, database_uri=database_uri)
+        super().__init__(
+            with_runner=True,
+            with_host=False,
+            database_uri=database_uri,
+            artifacts_dir=artifacts_dir,
+        )
         self._skip_build = skip_build
+        self._failure_index = 0
 
     async def __aenter__(self) -> UIEnvironment:
         # Build the SPA before the server boots so it mounts the static bundle.
@@ -116,3 +128,12 @@ class UIEnvironment(BenchEnvironment):
         await asyncio.to_thread(ensure_spa_built, skip_build=self._skip_build)
         await super().__aenter__()
         return self
+
+    async def capture_failure(self, page: Page, journey_name: str) -> None:
+        """Save the current page when CI requested diagnostic artifacts."""
+        if self.artifacts_dir is None:
+            return
+        self.artifacts_dir.mkdir(parents=True, exist_ok=True)
+        self._failure_index += 1
+        path = self.artifacts_dir / f"{journey_name}-{self._failure_index}.png"
+        await page.screenshot(path=path, full_page=True)

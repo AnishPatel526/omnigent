@@ -8,10 +8,18 @@ name: UI Benchmark
 # method+path). Same artifact contract as the HTTP benchmark (benchmark.yml),
 # so the workspace ETL notebook can ingest it the same way.
 #
-# Scheduled -> runs on the trusted default branch with the repo GITHUB_TOKEN;
-# it reads no PR-authored code. Also dispatchable for an ad-hoc run.
+# Pull requests run one functional sample per journey. Scheduled/manual runs
+# collect the full latency distribution and publish the long-lived artifact.
 
 on:
+  pull_request:
+    paths:
+      - ".github/workflows/e2e-ui-benchmark.yml"
+      - "dev/benchmarks/omnigent/**"
+      - "dev/benchmarks/omnigent_ui/**"
+      - "omnigent/**"
+      - "tests/benchmarks/test_ui_benchmark_smoke.py"
+      - "web/**"
   schedule:
     - cron: "43 7 * * *" # 07:43 UTC nightly (just after the HTTP benchmark)
   workflow_dispatch:
@@ -33,32 +41,23 @@ permissions:
   contents: read
 
 env:
-  # No SPA build during `uv sync`: a dedicated step builds the bundle, and the
-  # setup.py build otherwise times out on public npm.
-  OMNIGENT_SKIP_WEB_UI: "true"
-  # Scrub harness credentials the benchmark server must not pick up
-  # (OPENAI_* are overridden to the mock inside the spawned server/runner env).
-  ANTHROPIC_API_KEY: ""
-  DATABRICKS_TOKEN: ""
   UV_INDEX_URL: https://pypi.org/simple
   PIP_INDEX_URL: https://pypi.org/simple
   # Root/container Chromium refuses to start without --no-sandbox; the harness
   # adds the flag when this is set (matches the e2e_ui suite).
   OMNIGENT_PW_NO_SANDBOX: "1"
-  ITERATIONS: ${{ github.event_name == 'workflow_dispatch' && inputs.iterations || '8' }}
-  RUNS: ${{ github.event_name == 'workflow_dispatch' && inputs.runs || '3' }}
+  ITERATIONS: ${{ github.event_name == 'pull_request' && '1' || (github.event_name == 'workflow_dispatch' && inputs.iterations || '8') }}
+  RUNS: ${{ github.event_name == 'pull_request' && '1' || (github.event_name == 'workflow_dispatch' && inputs.runs || '3') }}
 
 concurrency:
-  # Never cancel a scheduled run mid-flight (each is a distinct data point).
-  # Manual dispatches get a per-run group so repeated ad-hoc runs never cancel.
-  group: ui-benchmark-${{ github.event_name }}-${{ github.ref }}-${{ github.run_id }}
-  cancel-in-progress: ${{ github.event_name == 'workflow_dispatch' }}
+  group: ui-benchmark-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   ui-benchmark:
     name: Run UI benchmark
     if: github.repository == 'omnigent-ai/omnigent'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 40
     steps:
       - name: Check out repo
@@ -75,8 +74,10 @@ jobs:
         with:
           python-version-file: ".python-version"
 
-      - name: Set up Node 20
+      - name: Set up Node 22
         uses: ./.github/actions/setup-node
+        with:
+          node-version: "22"
 
       - name: Set up uv
         uses: astral-sh/setup-uv@38f3f104447c67c051c4a08e39b64a148898af3a # v3
@@ -84,16 +85,12 @@ jobs:
           enable-cache: true
 
       - name: Install dependencies
-        run: uv sync --locked --extra all --extra dev
-
-      - name: Install bubblewrap + tmux
-        # The runner opens terminals under os_env, whose linux_bwrap backend
-        # needs `bwrap`; the apparmor sysctl mirrors the e2e-ui workflow
-        # (Ubuntu 24.04 blocks the user namespaces bwrap's unshare needs).
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y bubblewrap tmux
-          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+        # Skip setup.py's implicit SPA build only for dependency installation.
+        # The dedicated build below uses npm ci, then the harness verifies that
+        # exact bundle via --skip-build.
+        env:
+          OMNIGENT_SKIP_WEB_UI: "true"
+        run: uv sync --locked --extra dev
 
       - name: Cache Playwright browsers
         uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v4
@@ -123,6 +120,7 @@ jobs:
             --skip-build \
             --iterations "$ITERATIONS" \
             --runs "$RUNS" \
+            --artifacts-dir ui-benchmark-artifacts \
             --output ui-benchmark-results.json
 
       - name: Upload UI benchmark results
@@ -131,5 +129,14 @@ jobs:
         with:
           name: ui-benchmark-results-${{ github.run_id }}
           path: ui-benchmark-results.json
-          retention-days: 90
+          retention-days: ${{ github.event_name == 'pull_request' && 7 || 90 }}
           if-no-files-found: warn
+
+      - name: Upload UI benchmark diagnostics
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: failure()
+        with:
+          name: ui-benchmark-diagnostics-${{ github.run_id }}
+          path: ui-benchmark-artifacts/
+          retention-days: 7
+          if-no-files-found: ignore

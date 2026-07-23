@@ -52,6 +52,20 @@ from tests._helpers.compat import (
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 _MOCK_SERVER = _REPO_ROOT / "tests" / "server" / "integration" / "mock_llm_server.py"
 
+# Benchmark subprocesses must never discover ambient provider credentials. The
+# harness wires its own mock connection below; inherited auth can otherwise
+# select a real provider or a developer's Databricks profile.
+_AMBIENT_CREDENTIAL_VARS = (
+    "ANTHROPIC_API_KEY",
+    "CLAUDE_CODE",
+    "CLAUDECODE",
+    "CLAUDE_CODE_ENTRYPOINT",
+    "CLAUDE_CODE_EXECPATH",
+    "CODEX",
+    "DATABRICKS_CONFIG_PROFILE",
+    "DATABRICKS_TOKEN",
+)
+
 _HEALTH_TIMEOUT_S = 90.0
 _MOCK_TIMEOUT_S = 15.0
 _POLL_INTERVAL_S = 0.2
@@ -126,6 +140,8 @@ class BenchEnvironment:
     :param harness: Harness for full-turn agents when ``with_runner`` (default
         ``openai-agents``, a base dependency needing no vendor CLI binary).
     :param model: Model string baked into registered agent specs.
+    :param artifacts_dir: Optional directory that receives subprocess logs on
+        teardown. Useful in CI where the temporary environment is deleted.
     """
 
     def __init__(
@@ -136,6 +152,7 @@ class BenchEnvironment:
         database_uri: str | None = None,
         harness: str = _DEFAULT_HARNESS,
         model: str = _DEFAULT_MODEL,
+        artifacts_dir: Path | None = None,
     ) -> None:
         # with_host is additive over with_runner: the boot runner still serves
         # the warm journeys, and the host daemon additionally lets the cold-start
@@ -145,6 +162,7 @@ class BenchEnvironment:
         self.database_uri = database_uri
         self.harness = harness
         self.model = model
+        self.artifacts_dir = artifacts_dir
         self.base_url = ""
         self.mock_url = ""
         self.runner_id = ""
@@ -211,6 +229,16 @@ class BenchEnvironment:
         binding_token = uuid.uuid4().hex
 
         base_env = {**os.environ}
+        for name in _AMBIENT_CREDENTIAL_VARS:
+            base_env.pop(name, None)
+        base_env.update(
+            {
+                "DATABRICKS_CONFIG_FILE": str(self._tmp / "no-databrickscfg"),
+                "OMNIGENT_CONFIG_HOME": str(self._tmp / "config"),
+                "OMNIGENT_NO_UPDATE_CHECK": "1",
+                "OMNIGENT_SKIP_ONBOARD": "1",
+            }
+        )
         if self.with_runner:
             self.runner_id = token_bound_runner_id(binding_token)
             base_env["OPENAI_API_KEY"] = "mock-key"
@@ -255,6 +283,10 @@ class BenchEnvironment:
             handle.close()
         import shutil
 
+        if self.artifacts_dir is not None:
+            self.artifacts_dir.mkdir(parents=True, exist_ok=True)
+            for log_path in self._tmp.glob("*.log"):
+                shutil.copy2(log_path, self.artifacts_dir / log_path.name)
         shutil.rmtree(self._tmp, ignore_errors=True)
 
     def _sample_resources(self, interval: float = 1.0) -> None:
@@ -656,7 +688,13 @@ class BenchEnvironment:
         created.raise_for_status()
         return str(created.json()["id"])
 
-    async def seed_items(self, session_id: str, count: int) -> None:
+    async def seed_items(
+        self,
+        session_id: str,
+        count: int,
+        *,
+        text_prefix: str = "benchmark seed item",
+    ) -> None:
         """Append *count* history items over HTTP, with no runner or LLM.
 
         Uses the ``external_conversation_item`` event, which the server
@@ -675,7 +713,7 @@ class BenchEnvironment:
                     "item_type": "message",
                     "item_data": {
                         "role": "user",
-                        "content": [{"type": "input_text", "text": f"benchmark seed item {i}"}],
+                        "content": [{"type": "input_text", "text": f"{text_prefix} {i}"}],
                     },
                 },
             }

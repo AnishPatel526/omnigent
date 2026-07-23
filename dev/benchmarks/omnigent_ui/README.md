@@ -22,8 +22,8 @@ wants.
 One-time setup (in a worktree the venv + node deps may be missing):
 
 ```bash
-OMNIGENT_SKIP_WEB_UI=true uv sync --extra dev --extra e2e-ui   # venv (once)
-uv run playwright install --with-deps chromium                  # browser (once)
+OMNIGENT_SKIP_WEB_UI=true uv sync --extra dev        # venv (once)
+uv run playwright install --with-deps chromium       # browser (once)
 ```
 
 Then:
@@ -54,19 +54,19 @@ uses).
 Key flags (`--help` for all): `--journeys A,B`, `--database-uri URI` (default:
 throwaway empty SQLite), `--iterations N` (per run, clamped per journey),
 `--runs N`, `--warmup N`, `--headed`, `--skip-build`, `--output FILE`,
-`--max-p50-ms` / `--max-p99-ms` (CI thresholds).
+`--artifacts-dir DIR`, `--max-p50-ms` / `--max-p99-ms` (CI thresholds).
 
 ## Journeys
 
 | Journey | What it times | Isolation |
 | --- | --- | --- |
 | `landing_load` | `goto /` → landing composer visible (cold first paint) | fresh context per rep |
-| `new_session_first_token` | fresh bound session → type in composer → Send → first streamed assistant token | fresh context per rep |
+| `warm_session_first_token` | prepared prompt on a fresh session using the warm boot runner → Send → first rendered assistant token | fresh context per rep |
 | `switch_sessions` | click between two seeded sessions in the sidebar (client-side nav) → target conversation renders | one shared page (JS state must survive) |
 | `fork_session` | fork from an assistant response → forked conversation renders | fresh context per rep |
 
-`landing_load` and `new_session_first_token` use a fresh browser context each
-repetition so they measure a true cold visit. `switch_sessions` reuses one page
+`landing_load` and `warm_session_first_token` use a fresh browser context each
+repetition so browser cache and storage never leak between samples. `switch_sessions` reuses one page
 because a client-side sidebar switch depends on the SPA's in-memory store —
 a full reload would reset it, so it must not `goto`.
 
@@ -87,9 +87,10 @@ Same JSON contract as the HTTP benchmark (`schema.py` `build_report`,
   "backend": "sqlite",
   "runs": [ { "n_success": 8, "p50_ms": 412.0, "p95_ms": 480.0, ... } ],
   "summary": { "avg_p50_ms": 412.0, "avg_p95_ms": 480.0, "avg_p99_ms": 495.0, ... },
+  "distribution": { "samples": 24, "p50_ms": 412.0, "p95_ms": 480.0, ... },
   "network": {
     "aggregation": "median_per_rep",   // counts are the median across reps
-    "reps": 8,
+    "reps": 24,
     "by_resource_type": { "document": 1, "script": 6, "fetch": 4, "websocket": 1 },
     "by_endpoint": { "GET /v1/sessions/:id": 2, "POST /v1/sessions/:id/events": 1 },
     "median_total_requests": 14,
@@ -99,6 +100,10 @@ Same JSON contract as the HTTP benchmark (`schema.py` `build_report`,
   "browser_timing": { "first_contentful_paint_ms": 210.4, "dom_content_loaded_ms": 180.2 }
 }
 ```
+
+UI percentile fields in `summary` are computed over the pooled successful
+samples across all runs, rather than averaging tiny per-run percentile
+estimates. `distribution` records that pooled sample count explicitly.
 
 Network counts are grouped **two** ways: by Playwright resource type
 (`document`/`script`/`stylesheet`/`xhr`/`fetch`/`websocket`/`image`/`font`) and
@@ -119,6 +124,6 @@ uv run --no-sync dev/benchmarks/omnigent/compare.py \
 
 ## CI
 
-`.github/workflows/e2e-ui-benchmark.yml` runs this nightly (and on
-`workflow_dispatch`) and uploads `ui-benchmark-results.json` as an artifact. No
-PR gate for now.
+`.github/workflows/e2e-ui-benchmark.yml` runs one functional sample per journey
+on relevant pull requests. Nightly and `workflow_dispatch` runs collect the full
+configured sample count and upload `ui-benchmark-results.json` as an artifact.

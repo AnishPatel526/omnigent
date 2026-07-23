@@ -6,7 +6,7 @@ lane (no browser, no server, no creds).
 
 The full browser end-to-end test needs a built SPA and an installed Playwright
 Chromium, which the normal lane lacks, so it auto-skips unless both are present
-(run it locally after ``uv sync --extra e2e-ui`` + ``playwright install
+(run it locally after ``uv sync --extra dev`` + ``playwright install
 chromium``). CI exercises the full path nightly via e2e-ui-benchmark.yml.
 """
 
@@ -16,7 +16,8 @@ import argparse
 import shutil
 from collections import Counter
 from pathlib import Path
-from typing import cast
+from types import SimpleNamespace
+from typing import Any, cast
 
 import pytest
 
@@ -31,12 +32,13 @@ from dev.benchmarks.omnigent_ui.journeys import (
     summarize_browser_timing,
 )
 from dev.benchmarks.omnigent_ui.netcapture import (
+    NetCapture,
     RepCapture,
     aggregate_network,
     normalize_path,
 )
 
-_ALL = ["landing_load", "new_session_first_token", "switch_sessions", "fork_session"]
+_ALL = ["landing_load", "warm_session_first_token", "switch_sessions", "fork_session"]
 
 
 def _d(value: object) -> dict[str, object]:
@@ -134,6 +136,32 @@ def test_aggregate_network_empty() -> None:
     assert block["per_rep_total_requests"] == []
 
 
+def test_netcapture_counts_websocket_once() -> None:
+    class _Page:
+        def on(self, _event: str, _handler: object) -> None:
+            pass
+
+        def remove_listener(self, _event: str, _handler: object) -> None:
+            pass
+
+    capture = NetCapture(cast(Any, _Page()))
+    capture.start()
+    request = SimpleNamespace(
+        resource_type="websocket",
+        method="GET",
+        url="http://h/v1/sessions/" + "a" * 32 + "/events",
+    )
+    websocket = SimpleNamespace(url=request.url)
+    capture._on_request(cast(Any, request))
+    capture._on_websocket(cast(Any, websocket))
+    rep = capture.stop()
+
+    assert rep.total == 1
+    assert rep.websocket_opened == 1
+    assert rep.by_resource_type == Counter({"websocket": 1})
+    assert rep.by_endpoint == Counter({"WS /v1/sessions/:id/events": 1})
+
+
 # ── iteration clamp + registry ───────────────────────────────
 
 
@@ -156,11 +184,65 @@ def test_backend_of_classifies_uri_schemes() -> None:
     assert ui_run._backend_of("mysql+mysqldb://u@h/db") == "mysql"
 
 
+def test_ui_aggregate_pools_percentiles_across_runs() -> None:
+    block = ui_run._aggregate_ui_results(
+        [
+            RunResult(latencies_ms=[1.0, 100.0], wall_time=1.0),
+            RunResult(latencies_ms=[2.0, 3.0], wall_time=1.0),
+        ]
+    )
+    distribution = _d(block["distribution"])
+    assert distribution["samples"] == 4
+    assert distribution["p50_ms"] == 2.0
+    assert distribution["p95_ms"] == 100.0
+    assert _d(block["summary"])["avg_p50_ms"] == 2.0
+
+
+def test_ui_failures_fail_the_run_without_thresholds() -> None:
+    failed = RunResult()
+    failed.record_failure("TimeoutError")
+    assert ui_run._has_failures([failed])
+    assert not ui_run._has_failures([RunResult(latencies_ms=[1.0])])
+
+
+def test_ui_threshold_distribution_matches_report_summary() -> None:
+    results = [
+        RunResult(latencies_ms=[1.0, 100.0], wall_time=1.0),
+        RunResult(latencies_ms=[2.0, 3.0], wall_time=1.0),
+    ]
+    pooled = ui_run._pooled_result(results)
+    assert len(pooled) == 1
+    assert pooled[0].percentile(50) == 2.0
+    assert pooled[0].percentile(95) == 100.0
+
+
+def test_ui_skipped_block_has_no_latency_metrics() -> None:
+    journey = ALL_UI_JOURNEYS["switch_sessions"]
+    block = ui_run._skipped_block(journey, "sqlite", RuntimeError("boom"))
+    assert block["skipped"] is True
+    assert block["summary"] == {}
+    assert block["error"] == "RuntimeError: boom"
+    assert _d(block["network"])["reps"] == 0
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["--iterations", "0"],
+        ["--runs", "0"],
+        ["--warmup", "-1"],
+    ],
+)
+def test_parse_args_rejects_invalid_sample_counts(argv: list[str]) -> None:
+    with pytest.raises(SystemExit):
+        ui_run._parse_args(argv)
+
+
 # ── report block shape ───────────────────────────────────────
 
 
 def test_report_block_carries_network_and_summary() -> None:
-    """A journey block folds latency summary + a network block under schema v4."""
+    """A journey block folds latency summary + a network block under schema v5."""
     block = aggregate([RunResult(latencies_ms=[400.0, 420.0], wall_time=1.0)])
     block["kind"] = "ui-latency"
     block["network"] = build_network_block(
@@ -227,6 +309,7 @@ async def test_ui_benchmark_smoke_end_to_end() -> None:
         warmup=0,
         headed=False,
         skip_build=_HAS_SPA_BUILD,
+        artifacts_dir=None,
         output=None,
         max_p50_ms=None,
         max_p99_ms=None,

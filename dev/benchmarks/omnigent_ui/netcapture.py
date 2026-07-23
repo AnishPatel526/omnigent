@@ -97,7 +97,7 @@ class RepCapture:
     :param by_resource_type: Count of requests per Playwright resource type.
     :param by_endpoint: Count of requests per ``"{METHOD} {normalized_path}"``.
     :param websocket_opened: Number of WebSocket connections opened.
-    :param total: Total requests observed in the timed window.
+    :param total: Total HTTP requests plus WebSocket connections observed.
     """
 
     by_resource_type: Counter[str] = field(default_factory=Counter)
@@ -129,6 +129,10 @@ class NetCapture:
     def _on_request(self, request: Request) -> None:
         if not self._active:
             return
+        # Playwright can surface the WebSocket handshake as a request as well as
+        # a websocket event. Count the connection once in _on_websocket.
+        if request.resource_type == "websocket":
+            return
         self._rep.total += 1
         self._rep.by_resource_type[request.resource_type or "other"] += 1
         self._rep.by_endpoint[f"{request.method} {normalize_path(request.url)}"] += 1
@@ -136,6 +140,7 @@ class NetCapture:
     def _on_websocket(self, ws: WebSocket) -> None:
         if not self._active:
             return
+        self._rep.total += 1
         self._rep.websocket_opened += 1
         self._rep.by_resource_type["websocket"] += 1
         self._rep.by_endpoint[f"WS {normalize_path(ws.url)}"] += 1
