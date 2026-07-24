@@ -51,6 +51,7 @@ import {
   PANEL_NO_TERMINAL_KEY,
   terminalTabKey,
   useTerminals,
+  useTerminalsLivenessSync,
 } from "@/hooks/useTerminals";
 import {
   useWorkspaceChangedFiles,
@@ -280,6 +281,11 @@ export function AppShell() {
   const { terminals } = useTerminals(conversationId ?? null, {
     reconcileWhilePending: terminalPending,
   });
+  // Owns the runner-liveness corrections to the shared terminals cache. Mounted
+  // once here — the shell outlives chat↔terminal switches — so extra
+  // `useTerminals` consumers (the terminal view, the rail) don't re-fire the
+  // "came online" refetch each time they mount.
+  useTerminalsLivenessSync(conversationId ?? null);
 
   const debugMode = useDebugMode();
   const { data: conversationsData } = useConversations("", true);

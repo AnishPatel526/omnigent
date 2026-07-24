@@ -394,13 +394,10 @@ export function useTerminals(
   // The terminal list is SSE-primary: live `session.resource.{created,deleted}`
   // deltas (plus the mount seed) ARE the list, so a terminal becomes openable
   // the instant its `created` event lands — no waiting on the runner-liveness
-  // poll. The `/health` poll (`runnerOnline`) is only a *corrector* for the
-  // statuses the SSE stream can't deliver, applied on its liveness edges in the
-  // effect below — it never continuously masks the SSE-driven list. Runner
-  // liveness is poll-driven (the real-time push was removed upstream), so a
-  // continuous mask would read stale-`false` during a cold/relaunch boot and
-  // wrongly hide a terminal the SSE just delivered.
-  const runnerOnline = useSessionRunnerOnline(conversationId ?? undefined);
+  // poll. The runner-liveness corrections that the SSE stream can't deliver
+  // live in `useTerminalsLivenessSync`, mounted once per session in the shell —
+  // NOT here, so mounting an extra consumer (e.g. opening the terminal view)
+  // never re-fires the "came online" refetch on this shared cache.
   const { data, isLoading, error } = useQuery({
     queryKey:
       conversationId === null
@@ -429,20 +426,48 @@ export function useTerminals(
     refetchInterval: (query) =>
       terminalsReconcileInterval(reconcileWhilePending, query.state.data?.length ?? 0),
   });
-  // The poll corrects the SSE-driven list ONLY on runner-liveness edges — it
-  // never masks continuously. Two corrections, both keyed off the edge so a
-  // stale-`false` read during boot (before the runner has ever been seen up)
-  // can't wipe a terminal the SSE just delivered:
-  //
-  //   - `→ true` (came online): re-read the authoritative endpoint to pick up
-  //     a `session.resource.created` the SSE may have dropped. The queryFn
-  //     unions, so a live SSE entry is never lost — this is purely additive.
-  //   - `true → false` (confirmed stop): the runner's PTYs are gone, but a
-  //     stop emits no `session.resource.deleted`, so the SSE list would keep
-  //     showing dead terminals. Clear them. Gated on the *was-online* edge so
-  //     it fires for a real stop, not for the cold-boot `undefined → false`
-  //     window (where the runner is on its way up and a terminal may already
-  //     have arrived via SSE).
+  return {
+    // SSE-primary: the list is whatever the cache holds (seed + live deltas,
+    // corrected on the runner-liveness edges in `useTerminalsLivenessSync`).
+    // No continuous runner-online mask.
+    terminals: data ?? [],
+    isLoading,
+    error: (error as Error | null) ?? null,
+  };
+}
+
+/**
+ * Correct the SSE-driven terminals cache on runner-liveness edges.
+ *
+ * Mount this EXACTLY ONCE per session, from a component that stays mounted
+ * for the session's whole lifetime (the shell), not from a
+ * :func:`useTerminals` consumer — the edge memory below is per-instance, so
+ * a fresh mount observing an already-online runner would read a spurious
+ * ``undefined → true`` "came online" edge and refetch the shared cache. That
+ * is exactly the cost a chat↔terminal tab switch used to pay on every toggle.
+ *
+ * The runner-liveness ``/health`` poll (``runnerOnline``) corrects the
+ * SSE-driven list ONLY on its edges — it never masks continuously. Two
+ * corrections, both keyed off the edge so a stale-``false`` read during boot
+ * (before the runner has ever been seen up) can't wipe a terminal the SSE
+ * just delivered:
+ *
+ *   - ``→ true`` (came online): re-read the authoritative endpoint to pick up
+ *     a ``session.resource.created`` the SSE may have dropped. The queryFn
+ *     unions, so a live SSE entry is never lost — this is purely additive.
+ *   - ``true → false`` (confirmed stop): the runner's PTYs are gone, but a
+ *     stop emits no ``session.resource.deleted``, so the SSE list would keep
+ *     showing dead terminals. Clear them. Gated on the *was-online* edge so
+ *     it fires for a real stop, not for the cold-boot ``undefined → false``
+ *     window (where the runner is on its way up and a terminal may already
+ *     have arrived via SSE).
+ *
+ * :param conversationId: Session/conversation identifier, or ``null`` when
+ *     no session is open (the effect is inert).
+ */
+export function useTerminalsLivenessSync(conversationId: string | null): void {
+  const queryClient = useQueryClient();
+  const runnerOnline = useSessionRunnerOnline(conversationId ?? undefined);
   const wasRunnerOnline = useRef<boolean | undefined>(undefined);
   useEffect(() => {
     if (conversationId !== null) {
@@ -454,11 +479,4 @@ export function useTerminals(
     }
     wasRunnerOnline.current = runnerOnline;
   }, [conversationId, runnerOnline, queryClient]);
-  return {
-    // SSE-primary: the list is whatever the cache holds (seed + live deltas,
-    // corrected on poll edges above). No continuous runner-online mask.
-    terminals: data ?? [],
-    isLoading,
-    error: (error as Error | null) ?? null,
-  };
 }

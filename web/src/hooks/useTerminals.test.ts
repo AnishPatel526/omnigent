@@ -20,6 +20,7 @@ import {
   terminalsReconcileInterval,
   terminalTabKey,
   useTerminals,
+  useTerminalsLivenessSync,
   type TerminalInfo,
 } from "./useTerminals";
 
@@ -376,6 +377,13 @@ describe("useTerminals — SSE-primary list, poll corrects on edges", () => {
     return { client, wrapper };
   }
 
+  // Mirror the shell: `useTerminals` reads the shared cache, and a single
+  // `useTerminalsLivenessSync` applies the runner-liveness edge corrections.
+  const useTerminalsWithSync = (conversationId: string) => {
+    useTerminalsLivenessSync(conversationId);
+    return useTerminals(conversationId);
+  };
+
   const TERMINAL = { id: "terminal_claude_main", name: "claude", session: "main", running: true };
   const emptyList = () => mockResponse({ object: "list", data: [] });
   const oneTerminal = () =>
@@ -402,7 +410,7 @@ describe("useTerminals — SSE-primary list, poll corrects on edges", () => {
     fetchMock.mockResolvedValue(oneTerminal());
     runnerOnlineMock.mockReturnValue(false);
 
-    const { result } = renderHook(() => useTerminals("conv_abc"), {
+    const { result } = renderHook(() => useTerminalsWithSync("conv_abc"), {
       wrapper: makeClientWrapper().wrapper,
     });
     await act(async () => void (await vi.advanceTimersByTimeAsync(0)));
@@ -420,7 +428,7 @@ describe("useTerminals — SSE-primary list, poll corrects on edges", () => {
     fetchMock.mockResolvedValue(oneTerminal());
     runnerOnlineMock.mockReturnValue(true);
 
-    const { result, rerender } = renderHook(() => useTerminals("conv_abc"), {
+    const { result, rerender } = renderHook(() => useTerminalsWithSync("conv_abc"), {
       wrapper: makeClientWrapper().wrapper,
     });
     await act(async () => void (await vi.advanceTimersByTimeAsync(0)));
@@ -446,7 +454,7 @@ describe("useTerminals — SSE-primary list, poll corrects on edges", () => {
     fetchMock.mockResolvedValue(emptyList());
     runnerOnlineMock.mockReturnValue(undefined);
 
-    const { result, rerender } = renderHook(() => useTerminals("conv_abc"), {
+    const { result, rerender } = renderHook(() => useTerminalsWithSync("conv_abc"), {
       wrapper: makeClientWrapper().wrapper,
     });
     await act(async () => void (await vi.advanceTimersByTimeAsync(0)));
@@ -464,6 +472,29 @@ describe("useTerminals — SSE-primary list, poll corrects on edges", () => {
     });
     await act(async () => void rerender());
     expect(result.current.terminals).toEqual([TERMINAL]);
+  });
+
+  it("mounting an extra useTerminals consumer while online does not refetch", async () => {
+    // The chat↔terminal switch: with a terminal already seeded and the runner
+    // online, opening a second `useTerminals` consumer must serve the shared
+    // cache without a network round-trip. The liveness edge memory lives in a
+    // single `useTerminalsLivenessSync`, so a fresh consumer can't read a
+    // spurious `undefined → true` "came online" edge and invalidate the cache.
+    fetchMock.mockResolvedValue(oneTerminal());
+    runnerOnlineMock.mockReturnValue(true);
+    const { wrapper } = makeClientWrapper();
+
+    const first = renderHook(() => useTerminalsWithSync("conv_abc"), { wrapper });
+    await act(async () => void (await vi.advanceTimersByTimeAsync(0)));
+    expect(first.result.current.terminals).toEqual([TERMINAL]);
+    const callsAfterFirst = fetchMock.mock.calls.length;
+
+    // A plain consumer (no liveness sync — the shell owns that one) mounts on
+    // the tab switch. It shares the cache and must not trigger any fetch.
+    const second = renderHook(() => useTerminals("conv_abc"), { wrapper });
+    await act(async () => void (await vi.advanceTimersByTimeAsync(0)));
+    expect(second.result.current.terminals).toEqual([TERMINAL]);
+    expect(fetchMock.mock.calls.length).toBe(callsAfterFirst);
   });
 });
 
