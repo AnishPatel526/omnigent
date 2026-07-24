@@ -207,11 +207,17 @@ async def _drive_install(base_url: str) -> None:
                 state="visible", timeout=30_000
             )
 
-            # Commit the Codex agent. Unconfigured harnesses intentionally fold
-            # into the More submenu once host readiness has loaded.
+            # Commit the Codex agent. Codex is the only agent here, so it is the
+            # effective selection and stays inline in the Harnesses group even
+            # though the host reports it unconfigured (the split keeps the active
+            # pick inline: `!unconfigured || a.id === effectiveAgentId`). Wait for
+            # the row to render before clicking — the agent list + host readiness
+            # load async, and clicking before the menu populates races the "needs
+            # setup" classification.
             await page.get_by_test_id("new-chat-landing-agent-select").click()
-            await page.get_by_test_id("new-chat-landing-harness-more").click()
-            await page.get_by_test_id("new-chat-landing-agent-ag_codex_e2e").click()
+            codex_row = page.get_by_test_id("new-chat-landing-agent-ag_codex_e2e")
+            await expect(codex_row).to_be_visible(timeout=30_000)
+            await codex_row.click()
 
             # The composer notice offers "Set up →", which opens the setup dialog.
             setup = page.get_by_test_id("new-chat-landing-harness-setup")
