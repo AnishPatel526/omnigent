@@ -222,7 +222,7 @@ def _dispatch_wrapper(
         run_claude_native(
             server=server,
             session_id=session_id,
-            claude_args=(),
+            extra_args=(),
         )
         return True
     if native_agent.key == "codex":
@@ -231,7 +231,7 @@ def _dispatch_wrapper(
         run_codex_native(
             server=server,
             session_id=session_id,
-            codex_args=(),
+            extra_args=(),
         )
         return True
     if native_agent.key == "pi":
@@ -240,7 +240,7 @@ def _dispatch_wrapper(
         run_pi_native(
             server=server,
             session_id=session_id,
-            pi_args=(),
+            extra_args=(),
         )
         return True
     if native_agent.key == "cursor":
@@ -249,7 +249,7 @@ def _dispatch_wrapper(
         run_cursor_native(
             server=server,
             session_id=session_id,
-            cursor_args=(),
+            extra_args=(),
         )
         return True
     if native_agent.key == "kiro":
@@ -258,7 +258,7 @@ def _dispatch_wrapper(
         run_kiro_native(
             server=server,
             session_id=session_id,
-            kiro_args=(),
+            extra_args=(),
         )
         return True
     if native_agent.key == "goose":
@@ -267,7 +267,7 @@ def _dispatch_wrapper(
         run_goose_native(
             server=server,
             session_id=session_id,
-            goose_args=(),
+            extra_args=(),
         )
         return True
     if native_agent.key == "antigravity":
@@ -276,7 +276,7 @@ def _dispatch_wrapper(
         run_antigravity_native(
             server=server,
             session_id=session_id,
-            antigravity_args=(),
+            extra_args=(),
         )
         return True
     if native_agent.key == "qwen":
@@ -285,7 +285,7 @@ def _dispatch_wrapper(
         run_qwen_native(
             server=server,
             session_id=session_id,
-            qwen_args=(),
+            extra_args=(),
         )
         return True
     if native_agent.key == "kimi":
@@ -294,7 +294,7 @@ def _dispatch_wrapper(
         run_kimi_native(
             server=server,
             session_id=session_id,
-            kimi_args=(),
+            extra_args=(),
         )
         return True
     if native_agent.key == "hermes":
@@ -303,7 +303,7 @@ def _dispatch_wrapper(
         run_hermes_native(
             server=server,
             session_id=session_id,
-            hermes_args=(),
+            extra_args=(),
         )
         return True
     return False
