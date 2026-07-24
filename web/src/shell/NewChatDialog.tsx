@@ -111,7 +111,7 @@ import { readLastHarness, writeLastHarness } from "@/lib/harnessPreferences";
 import { readHideUnconfiguredHarnesses } from "@/lib/harnessVisibilityPreferences";
 import { readDefaultBaseBranch } from "@/lib/baseBranchPreferences";
 import { readHarnessOptions, writeHarnessOption } from "@/lib/modePreferences";
-import { AUTO_HARNESS_ID, useBrainHarnessLabels } from "@/lib/agentLabels";
+import { AUTO_HARNESS_ID, AUTO_NATIVE_HARNESS_ID, useBrainHarnessLabels } from "@/lib/agentLabels";
 import { CLAUDE_NATIVE_MODELS } from "@/lib/claudeNativeModels";
 import { partitionAgentsByKind, sortAgentsForDisplay } from "@/lib/agentGrouping";
 import { cn } from "@/lib/utils";
@@ -979,6 +979,9 @@ export function AgentHarnessPicker({
   contentAlign = "end",
   triggerClassName,
   triggerLabelClassName,
+  autoNativeAvailable = false,
+  autoNativeActive = false,
+  onSelectAutoNative,
 }: {
   agentEntries: AvailableAgent[];
   harnessEntries: AvailableAgent[];
@@ -1013,6 +1016,14 @@ export function AgentHarnessPicker({
   triggerClassName?: string;
   /** Extra classes merged onto the trigger's label span. */
   triggerLabelClassName?: string;
+  /** Whether the "Auto" native-routing row is offered (routing on + a native
+   *  CLI ready). Defaults off, so an embedding host that doesn't wire routing
+   *  simply never shows the row. */
+  autoNativeAvailable?: boolean;
+  /** Whether "Auto" is the current pick (drives the row's active state,
+   *  independent of the selected agent). */
+  autoNativeActive?: boolean;
+  onSelectAutoNative?: () => void;
 }) {
   // Controlled so picking a row can close the menu.
   const [open, setOpen] = useState(false);
@@ -1264,9 +1275,29 @@ export function AgentHarnessPicker({
             {/* Harnesses group first — the native terminal CLIs (Claude Code is
             the default), so the most-used picks lead. Ready-to-use harnesses
             list inline; "needs setup" ones fold into a "More" group. */}
-            {(readyHarnessEntries.length > 0 || moreHarnessEntries.length > 0) && (
+            {(readyHarnessEntries.length > 0 ||
+              moreHarnessEntries.length > 0 ||
+              autoNativeAvailable) && (
               <>
                 <PickerSectionHeader>Harnesses</PickerSectionHeader>
+                {autoNativeAvailable && (
+                  <DropdownMenuItem
+                    data-testid="new-chat-landing-harness-auto-native"
+                    data-active={autoNativeActive ? "true" : undefined}
+                    onSelect={() => {
+                      onSelectAutoNative?.();
+                      setOpen(false);
+                    }}
+                    className="items-start gap-2 rounded-sm px-2 py-1.5 text-13 data-[active=true]:bg-accent/60 data-[active=true]:text-foreground"
+                  >
+                    <div className="flex min-w-0 flex-1 items-baseline gap-2.5">
+                      <span className="truncate">Auto</span>
+                      <span className="truncate text-[11px] text-muted-foreground/70">
+                        Pick a native CLI + model
+                      </span>
+                    </div>
+                  </DropdownMenuItem>
+                )}
                 {readyHarnessEntries.map(renderEntry)}
                 {moreHarnessEntries.length > 0 &&
                   (isMobile ? (
@@ -2825,7 +2856,14 @@ export function NewChatLandingScreen() {
   // The trigger label is just the agent name; the run-config knobs live in
   // the picker's per-entry submenu, so duplicating their values here would be
   // redundant.
-  const agentLabel = selectedAgent ? selectedAgent.display_name : "Select agent";
+  // "Auto (native)" rides on no real agent, so the trigger reads "Auto" rather
+  // than the fallback selected agent's name.
+  const agentLabel =
+    pickedHarness === AUTO_NATIVE_HARNESS_ID
+      ? "Auto"
+      : selectedAgent
+        ? selectedAgent.display_name
+        : "Select agent";
 
   // Wrap the harness setter so every explicit pick is persisted to
   // localStorage. The caller can pass an explicit `agentId` for the
@@ -2836,11 +2874,32 @@ export function NewChatLandingScreen() {
     (harness: string | null, agentId?: string) => {
       setPickedHarness(harness);
       writeLastHarness(agentId ?? effectiveAgentId, harness);
-      // Light up the routing icon when "Auto" is picked; turn it off otherwise.
-      _setCostControlMode(harness === AUTO_HARNESS_ID ? "on" : null);
+      // Light up the routing icon when either "Auto" variant is picked; both
+      // route (harness + model) and land with routing on.
+      _setCostControlMode(
+        harness === AUTO_HARNESS_ID || harness === AUTO_NATIVE_HARNESS_ID ? "on" : null,
+      );
     },
     [effectiveAgentId],
   );
+
+  // "Auto (native)": route among the host's installed native CLIs + model,
+  // landing as a native terminal. Purely a picker sentinel — it binds to NO
+  // real agent (the server routes at create and binds the chosen wrapper
+  // agent), so its active state is independent of the selected agent.
+  const anyNativeReady = useMemo(
+    () =>
+      ["claude-native", "codex-native", "pi-native"].some(
+        (h) => !harnessUnconfiguredOnHost(h, harnessWarningHost),
+      ),
+    [harnessWarningHost],
+  );
+  const autoNativeAvailable = smartRoutingEnabled && anyNativeReady;
+  const autoNativeActive = pickedHarness === AUTO_NATIVE_HARNESS_ID;
+  const handleSelectAutoNative = useCallback(() => {
+    setPickedHarness(AUTO_NATIVE_HARNESS_ID);
+    _setCostControlMode("on");
+  }, []);
 
   // Select an agent/harness from the picker. Switching agents seeds the
   // harness override from the user's last pick for that agent (so a
@@ -3021,12 +3080,20 @@ export function NewChatLandingScreen() {
             // it when routing is eligible for the effective harness, so a stale
             // "on" can't ride along invisibly with no control to clear it.
             cost_control_mode_override:
-              pickedHarness === AUTO_HARNESS_ID
+              pickedHarness === AUTO_HARNESS_ID || pickedHarness === AUTO_NATIVE_HARNESS_ID
                 ? "on"
                 : smartRoutingEligible
                   ? (costControlMode ?? undefined)
                   : undefined,
-            harness_override: pickedHarness ?? undefined,
+            // "Auto (native)": the server routes among installed native CLIs
+            // from native_auto_message and binds the chosen wrapper agent, so
+            // no harness_override is sent (native wrappers reject it). The
+            // message is still delivered normally after navigation; this copy
+            // is routing-only. The brain "auto" sentinel still rides
+            // harness_override.
+            ...(pickedHarness === AUTO_NATIVE_HARNESS_ID
+              ? { native_auto: true, native_auto_message: message }
+              : { harness_override: pickedHarness ?? undefined }),
           }),
         });
         if (!res.ok) {
@@ -3429,6 +3496,9 @@ export function NewChatLandingScreen() {
                   onSelectPending={handleSelectPending}
                   onCreateCustomAgent={() => setCreateAgentOpen(true)}
                   sandboxSelected={sandboxSelected}
+                  autoNativeAvailable={autoNativeAvailable}
+                  autoNativeActive={autoNativeActive}
+                  onSelectAutoNative={handleSelectAutoNative}
                 />
                 {/* Gear — opens the selected agent's run-config modal. Hidden
                   when the selected agent has no knobs to configure. Hovering

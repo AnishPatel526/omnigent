@@ -2757,3 +2757,73 @@ describe("NewChatLandingScreen agent picker (mobile drill-in)", () => {
     expect(screen.getByTestId("new-chat-landing-agent-a1")).toBeTruthy();
   });
 });
+
+describe("NewChatLandingScreen Auto (native) harness", () => {
+  beforeEach(setupLandingMocks);
+  afterEach(() => {
+    cleanup();
+    localStorage.clear();
+  });
+
+  it("shows the Auto row only when smart routing is enabled", () => {
+    // Routing off → no Auto row.
+    const { unmount } = renderLanding({ smart_routing_enabled: false });
+    fireEvent.pointerDown(screen.getByTestId("new-chat-landing-agent-select"), { button: 0 });
+    expect(screen.queryByTestId("new-chat-landing-harness-auto-native")).toBeNull();
+    unmount();
+    cleanup();
+    // Routing on → Auto row present (default host has native CLIs ready).
+    renderLanding({ smart_routing_enabled: true });
+    fireEvent.pointerDown(screen.getByTestId("new-chat-landing-agent-select"), { button: 0 });
+    expect(screen.getByTestId("new-chat-landing-harness-auto-native")).toBeTruthy();
+  });
+
+  it("hides the Auto row when no native CLI is ready on the host", () => {
+    mockHosts([
+      {
+        ...host("online"),
+        configured_harnesses: {
+          "claude-native": false,
+          "codex-native": "binary-missing",
+          "pi-native": "needs-auth",
+        },
+      } as Host,
+    ]);
+    renderLanding({ smart_routing_enabled: true });
+    fireEvent.pointerDown(screen.getByTestId("new-chat-landing-agent-select"), { button: 0 });
+    expect(screen.queryByTestId("new-chat-landing-harness-auto-native")).toBeNull();
+  });
+
+  it("posts native_auto + native_auto_message and no harness_override", async () => {
+    authenticatedFetchMock.mockResolvedValue({
+      ok: true,
+      json: async () => ({ id: "conv_new" }),
+    } as unknown as Response);
+    renderLanding({ smart_routing_enabled: true });
+    await waitFor(() =>
+      expect(screen.getByTestId("new-chat-landing-workspace-chip").textContent).toContain("repo"),
+    );
+    fireEvent.pointerDown(screen.getByTestId("new-chat-landing-agent-select"), { button: 0 });
+    fireEvent.click(screen.getByTestId("new-chat-landing-harness-auto-native"));
+    fireEvent.change(screen.getByTestId("new-chat-landing-input"), {
+      target: { value: "build me a feature" },
+    });
+    fireEvent.submit(screen.getByTestId("new-chat-landing-composer"));
+
+    await waitFor(() => expect(authenticatedFetchMock).toHaveBeenCalledTimes(1));
+    const [, init] = authenticatedFetchMock.mock.calls[0];
+    const body = JSON.parse((init as RequestInit).body as string) as {
+      native_auto?: boolean;
+      native_auto_message?: string;
+      harness_override?: string;
+      model_override?: string;
+      cost_control_mode_override?: string;
+    };
+    expect(body.native_auto).toBe(true);
+    expect(body.native_auto_message).toBe("build me a feature");
+    expect(body.cost_control_mode_override).toBe("on");
+    // Native wrappers reject harness_override; the server routes + binds.
+    expect(body.harness_override).toBeUndefined();
+    expect(body.model_override).toBeUndefined();
+  });
+});

@@ -1330,6 +1330,16 @@ class SessionCreateRequest(BaseModel):
         the spec's declared harness. Create-time only — there is no
         PATCH path, since the harness process spawns on the first
         turn.
+    :param native_auto: When ``True``, the new-chat "Auto" native option:
+        the server routes among the host's installed native terminal
+        harnesses (claude-native / codex-native / pi-native) using
+        ``native_auto_message`` and binds the session to the chosen native
+        wrapper agent. ``agent_id`` is ignored on this path. The user's
+        message is still delivered by the client after navigation, as usual.
+    :param native_auto_message: The user's first-message text used to route
+        the native harness when ``native_auto`` is set. Routing-only — it is
+        not persisted or dispatched (the client sends the actual message
+        after the create returns).
     """
 
     agent_id: str
@@ -1347,6 +1357,8 @@ class SessionCreateRequest(BaseModel):
     reasoning_effort: str | None = None
     cost_control_mode_override: str | None = None
     harness_override: str | None = None
+    native_auto: bool = False
+    native_auto_message: str | None = None
 
     @model_validator(mode="after")
     def _check_git_requires_host(self) -> SessionCreateRequest:

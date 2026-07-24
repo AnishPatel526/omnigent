@@ -45,6 +45,7 @@ from omnigent.host.frames import (
 from omnigent.llms.context_window import resolve_effective_context_window
 from omnigent.native_coding_agents import (
     native_coding_agent_for_agent_name,
+    native_coding_agent_for_harness,
 )
 from omnigent.policies.types import (
     ElicitationRequest,
@@ -5111,6 +5112,94 @@ def _native_subagent_wrapper_labels(
     return _native_subagent_wrapper_labels_from_spec(sub_spec)
 
 
+# Native harness ids offered to "Auto (native)" routing, cheapest-first (matches
+# _AUTO_NATIVE_ROUTING_HARNESSES on the routing side). Used as the deterministic
+# fallback order when routing is unavailable.
+_AUTO_NATIVE_CANDIDATE_HARNESSES: tuple[str, ...] = (
+    "claude-native",
+    "codex-native",
+    "pi-native",
+)
+# Host readiness values that mean the native CLI is NOT usable for routing: a
+# routed session that lands on an uninstalled / unauthenticated CLI would fail
+# to launch, so exclude these.
+_NATIVE_UNAVAILABLE_READINESS: frozenset[Any] = frozenset({False, "binary-missing", "needs-auth"})
+
+
+def _installed_native_harnesses(host: Host | None) -> set[str]:
+    """Return the native harness ids ready to launch on *host*.
+
+    Reads the host's ``configured_harnesses`` readiness map (the same signal the
+    picker uses to gate "needs setup" rows). A harness is installed when present
+    and its value is not a not-ready marker (:data:`_NATIVE_UNAVAILABLE_READINESS`).
+    Fails open (all candidates) when the host or its readiness map is absent, so
+    an older host that reports nothing does not silently disable native routing.
+    """
+    readiness = getattr(host, "configured_harnesses", None) if host is not None else None
+    if not readiness:
+        return set(_AUTO_NATIVE_CANDIDATE_HARNESSES)
+    installed: set[str] = set()
+    for harness in _AUTO_NATIVE_CANDIDATE_HARNESSES:
+        value = readiness.get(harness)
+        if value is None or value in _NATIVE_UNAVAILABLE_READINESS:
+            continue
+        installed.add(harness)
+    return installed
+
+
+async def _resolve_native_auto(
+    body: SessionCreateRequest,
+    request: Request,
+) -> tuple[str | None, str | None, dict[str, Any] | None, str | None]:
+    """Route the "Auto (native)" pick at create time.
+
+    Reads the host's installed native CLIs (no runner needed — native candidates
+    come from the static ``infer_models`` table) and asks the router to pick a
+    native harness + model from ``body.native_auto_message``. On success returns
+    the chosen native **wrapper agent name** (e.g. ``"claude-native-ui"``) so the
+    caller can bind the session to it exactly like a normal native create. When
+    routing is unavailable, falls back to the cheapest installed native CLI (so
+    the session still lands on a terminal) and returns its wrapper agent name
+    with no model (the CLI keeps its own default).
+
+    :returns: ``(agent_name, model, verdict, error)``. ``agent_name`` is ``None``
+        only when no native CLI is installed at all; ``error`` carries a
+        human-readable reason for the routing card when routing didn't apply.
+    """
+    from omnigent.server.smart_routing import route_session_harness
+
+    host_store = getattr(request.app.state, "host_store", None)
+    host = (
+        await asyncio.to_thread(host_store.get_host, body.host_id)
+        if host_store is not None and body.host_id is not None
+        else None
+    )
+    installed = _installed_native_harnesses(host)
+    if not installed:
+        return None, None, None, "No native CLI is installed on this host."
+
+    harness, model, verdict, error = await route_session_harness(
+        body.native_auto_message or "",
+        native=True,
+        installed_native_harnesses=installed,
+    )
+    if harness is None:
+        # Routing unavailable — land on the cheapest installed native CLI so the
+        # session still opens a terminal; the CLI uses its own default model.
+        fallback = next((h for h in _AUTO_NATIVE_CANDIDATE_HARNESSES if h in installed), None)
+        native_agent = native_coding_agent_for_harness(fallback) if fallback else None
+        return (
+            native_agent.agent_name if native_agent is not None else None,
+            None,
+            None,
+            error or "Routing unavailable; using the default native harness.",
+        )
+    native_agent = native_coding_agent_for_harness(harness)
+    if native_agent is None:
+        return None, None, None, error or "Routed harness is not a native terminal harness."
+    return native_agent.agent_name, model, verdict, None
+
+
 async def _create_session_from_existing_agent(
     conversation_store: ConversationStore,
     agent_store: AgentStore,
@@ -5161,9 +5250,39 @@ async def _create_session_from_existing_agent(
     _reject_reserved_cost_control_label_seed(body.labels)
     _reject_server_reserved_label_seed(body.labels)
 
+    # "Auto (native)": route among the host's installed native CLIs from the
+    # first-message text and bind the chosen native WRAPPER agent, so the rest of
+    # this function treats it as a normal native terminal create (no sentinel, no
+    # harness_override). Resolved before agent validation so the effective
+    # agent_id is the real wrapper agent. The routed model + a routing card are
+    # applied after the row exists (see below).
+    _native_auto_model: str | None = None
+    _native_auto_verdict: dict[str, Any] | None = None
+    _native_auto_error: str | None = None
+    _effective_agent_id = body.agent_id
+    if body.native_auto:
+        (
+            _na_agent_name,
+            _native_auto_model,
+            _native_auto_verdict,
+            _native_auto_error,
+        ) = await _resolve_native_auto(body, request)
+        if _na_agent_name is None:
+            raise OmnigentError(
+                _native_auto_error or "No native CLI is available for Auto routing on this host.",
+                code=ErrorCode.INVALID_INPUT,
+            )
+        _na_agent = await asyncio.to_thread(agent_store.get_by_name, _na_agent_name)
+        if _na_agent is None:
+            raise OmnigentError(
+                f"Native wrapper agent {_na_agent_name!r} is not registered on this server.",
+                code=ErrorCode.INTERNAL_ERROR,
+            )
+        _effective_agent_id = _na_agent.id
+
     agent = await validate_session_agent(
         user_id=user_id,
-        agent_id=body.agent_id,
+        agent_id=_effective_agent_id,
         agent_store=agent_store,
         permission_store=permission_store,
         conversation_store=conversation_store,
@@ -5187,7 +5306,8 @@ async def _create_session_from_existing_agent(
     # element at terminal launch, so reject shell-/flag-shaped values
     # before any row or worktree exists.
     model_override, reasoning_effort = validate_session_model_metadata(
-        model_override=body.model_override,
+        # For Auto (native), the routed model wins; the client sends no model.
+        model_override=_native_auto_model if body.native_auto else body.model_override,
         reasoning_effort=body.reasoning_effort,
     )
 
@@ -5446,6 +5566,22 @@ async def _create_session_from_existing_agent(
         conv = await asyncio.to_thread(conversation_store.get_conversation, conv.id)
     elif body.labels:
         await asyncio.to_thread(conversation_store.set_labels, conv.id, body.labels)
+
+    # Auto (native): surface the routing decision as a transcript card so the
+    # user sees which native harness + model was picked (or why routing fell
+    # back). Emitted after the row exists.
+    if body.native_auto:
+        if _native_auto_model is not None and _native_auto_verdict is not None:
+            await _emit_server_routing_decision(
+                conv.id, conversation_store, _native_auto_model, _native_auto_verdict
+            )
+        elif _native_auto_error is not None:
+            await _emit_server_routing_decision(
+                conv.id,
+                conversation_store,
+                "unavailable",
+                {"rationale": _native_auto_error, "applied": False},
+            )
 
     # Emit session.created exactly once at creation time.
     # Best-effort: skip if the host opted out via HostHelloFrame.

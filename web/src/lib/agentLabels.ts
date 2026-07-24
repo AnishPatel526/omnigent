@@ -91,6 +91,15 @@ function useHarnessCatalog<T>(select: (c: HarnessCatalog) => T, fallback: T): T 
  */
 export const AUTO_HARNESS_ID = "auto";
 
+/**
+ * Picker sentinel for the native "Auto" option. Not sent as `harness_override`
+ * (native wrapper agents reject it); instead the create request carries
+ * `native_auto: true` + `native_auto_message`, and the server routes among the
+ * host's installed native CLIs and binds the chosen wrapper agent. Used only as
+ * a client-side marker for the picker's active state.
+ */
+export const AUTO_NATIVE_HARNESS_ID = "auto-native";
+
 export function useBrainHarnessLabels(smartRoutingEnabled = false): Record<string, string> {
   const base = useHarnessCatalog((c) => c.labels, BRAIN_HARNESS_LABELS);
   if (!smartRoutingEnabled) return base;

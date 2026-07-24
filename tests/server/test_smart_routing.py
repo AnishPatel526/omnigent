@@ -14,6 +14,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from omnigent.server.smart_routing import (
+    _AUTO_NATIVE_ROUTING_HARNESSES,
     _AUTO_ROUTING_HARNESSES,
     LLMRoutingClient,
     RoutingResult,
@@ -90,6 +91,8 @@ def test_infer_models_claude_sdk() -> None:
 def test_infer_models_native_harnesses() -> None:
     assert infer_models("claude-native") is not None
     assert infer_models("codex-native") is not None
+    # pi-native must resolve so "Auto (native)" can offer it as a candidate.
+    assert infer_models("pi-native") is not None
 
 
 def test_infer_models_codex() -> None:
@@ -1153,3 +1156,78 @@ async def test_route_session_harness_falls_back_by_model_when_harness_absent() -
     # deterministically resolves to codex.
     assert harness == "codex"
     assert model == "databricks-gpt-5-4-nano"
+
+
+# ── Native (Auto native) routing ─────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_route_session_harness_native_offers_only_installed_candidates() -> None:
+    """native=True offers only the installed native harnesses as candidates."""
+    received: list[str] = []
+
+    class _CapturingClient:
+        async def route(
+            self, _message: str, available_models: dict[str, list[str]]
+        ) -> RoutingResult | None:
+            received.extend(available_models.keys())
+            return RoutingResult(
+                model="databricks-claude-opus-4-8", rationale="x", harness="claude-native"
+            )
+
+    caps = _FakeCaps(routing_client=_CapturingClient())
+    with patch("omnigent.runtime._globals._caps", new=caps):
+        harness, model, verdict, error = await route_session_harness(
+            "refactor auth",
+            native=True,
+            installed_native_harnesses={"claude-native", "pi-native"},
+        )
+    # Only the installed natives are candidates — codex-native is excluded.
+    assert set(received) == {"claude-native", "pi-native"}
+    assert "codex-native" not in received
+    # The native pick is kept verbatim (no SDK redirect).
+    assert harness == "claude-native"
+    assert model == "databricks-claude-opus-4-8"
+    assert verdict is not None
+    assert error is None
+
+
+@pytest.mark.asyncio
+async def test_route_session_harness_native_empty_install_set_errors() -> None:
+    """No installed native CLI → the standard no-routable error (degrades safely)."""
+    caps = _FakeCaps(
+        routing_client=_FakeRoutingClient(
+            RoutingResult(
+                model="databricks-claude-opus-4-8", rationale="x", harness="claude-native"
+            )
+        )
+    )
+    with patch("omnigent.runtime._globals._caps", new=caps):
+        harness, model, verdict, error = await route_session_harness(
+            "do work",
+            native=True,
+            installed_native_harnesses=set(),
+        )
+    assert harness is None
+    assert model is None
+    assert verdict is None
+    assert error is not None
+
+
+@pytest.mark.asyncio
+async def test_route_session_harness_native_keeps_pick_without_sdk_redirect() -> None:
+    """A native pick that would trip the SDK redirect (claude on pi) is kept as-is."""
+    expected = RoutingResult(
+        model="databricks-claude-haiku-4-5", rationale="cheap", harness="pi-native"
+    )
+    caps = _FakeCaps(routing_client=_FakeRoutingClient(expected))
+    with patch("omnigent.runtime._globals._caps", new=caps):
+        harness, model, _verdict, error = await route_session_harness(
+            "quick q",
+            native=True,
+            installed_native_harnesses=set(_AUTO_NATIVE_ROUTING_HARNESSES),
+        )
+    # pi-native is not the SDK "pi", so no redirect; the native landing is kept.
+    assert harness == "pi-native"
+    assert model == "databricks-claude-haiku-4-5"
+    assert error is None

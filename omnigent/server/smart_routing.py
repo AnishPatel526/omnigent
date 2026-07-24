@@ -58,6 +58,7 @@ _HARNESS_FAMILY: dict[str, str] = {
     "claude_sdk": "claude",
     "claude-native": "claude",
     "pi": "pi",
+    "pi-native": "pi",
     "codex": "gpt",
     "codex-native": "gpt",
     "openai-agents": "gpt",
@@ -602,6 +603,18 @@ class ExternalRoutingClient:
 # them. claude-sdk owns Claude models; pi is the last-resort multi-model home.
 _AUTO_ROUTING_HARNESSES: tuple[str, ...] = ("claude-sdk", "codex", "pi")
 
+# Native terminal harnesses offered when the user picks "Auto (native)" in the
+# native picker. Unlike the SDK set above, these land as terminal sessions
+# (embedded CLI TUI) and bake the model into the launch argv once. Candidates
+# are intersected with the host's installed native CLIs at routing time (an
+# uninstalled CLI can't launch), so this tuple is the full menu and the caller
+# supplies the installed subset. Same cheapest-first tiebreak order.
+_AUTO_NATIVE_ROUTING_HARNESSES: tuple[str, ...] = (
+    "claude-native",
+    "codex-native",
+    "pi-native",
+)
+
 # The live runner catalog (fetch_runner_models) keys rows by WORKER name — the
 # sub-agent names declared in the parent spec (e.g. "claude_code") plus "self"
 # for the session's own harness — NOT by harness id. Map the common worker
@@ -681,6 +694,8 @@ async def route_session_harness(
     session_id: str | None = None,
     catalog_session_id: str | None = None,
     runner_client: httpx.AsyncClient | None = None,
+    native: bool = False,
+    installed_native_harnesses: set[str] | None = None,
 ) -> tuple[str | None, str | None, dict[str, Any] | None, str | None]:
     """Pick the best harness + model for a new session via the routing client.
 
@@ -688,7 +703,8 @@ async def route_session_harness(
     (defaulting to *session_id*) and *runner_client* are provided, falling back
     to the static ``infer_models`` table for any harness not represented in the
     live data.  Only harnesses in :data:`_AUTO_ROUTING_HARNESSES` are offered as
-    candidates.
+    candidates — or, when *native* is set, :data:`_AUTO_NATIVE_ROUTING_HARNESSES`
+    intersected with *installed_native_harnesses*.
 
     :param user_message: The user's first message text, used to size the task.
     :param session_id: Session being routed (optional).
@@ -699,6 +715,14 @@ async def route_session_harness(
         ``"self"`` row and would force the static fallback. Defaults to
         *session_id* when unset.
     :param runner_client: HTTP client pointed at the runner (optional).
+    :param native: When set, route among native terminal harnesses
+        (:data:`_AUTO_NATIVE_ROUTING_HARNESSES`) so the session lands as a native
+        terminal, instead of the in-process SDK harnesses. Candidates come from
+        the static ``infer_models`` table (no runner catalog needed).
+    :param installed_native_harnesses: Native harness ids actually installed on
+        the session's host. Only meaningful with *native*; candidates are
+        intersected with this set so routing never picks an uninstalled CLI. An
+        empty/``None`` set yields no candidates (returns the standard error).
     :returns: ``(harness, model, verdict, error)`` — on success ``error`` is
         ``None``; on failure ``harness``, ``model``, and ``verdict`` are ``None``
         and ``error`` carries a human-readable reason shown in the UI.
@@ -713,40 +737,54 @@ async def route_session_harness(
     if _caps is None or _caps.routing_client is None:
         return None, None, None, "Intelligent routing is not configured on this server."
 
-    # Fetch the live catalog. Its rows are keyed by worker name (sub-agent
-    # names + "self"), so normalize those to harness ids before matching
-    # against _AUTO_ROUTING_HARNESSES. Prefer catalog_session_id (the parent
-    # for a sub-agent) so the candidate set is the full spawnable-worker map,
-    # independent of whether the routed session is top-level or a sub-agent.
-    _catalog_sid = catalog_session_id or session_id
-    live_catalog: dict[str, list[str]] | None = None
-    if _catalog_sid and runner_client is not None:
-        live_catalog = await fetch_runner_models(_catalog_sid, runner_client)
-
-    # NOTE: we do NOT filter incompatible (harness, model) pairs out of the
-    # candidate set here. The external router (task_v0) enforces a required
-    # model set and 400s if any required model is missing, so dropping e.g.
-    # gpt-5-6-luna would break the whole request. Instead we send the full set
-    # and correct an incompatible verdict afterward via
-    # _redirect_incompatible_pick.
     harness_models: dict[str, list[str]] = {}
-    if live_catalog:
-        for worker_name, worker_models in live_catalog.items():
-            harness = _WORKER_NAME_TO_HARNESS.get(worker_name)
-            if harness is None or harness not in _AUTO_ROUTING_HARNESSES:
+    if native:
+        # Native terminal harnesses are not in the live runner catalog (its rows
+        # are the in-process SDK workers), so build candidates from the static
+        # infer_models table, restricted to the native CLIs installed on the
+        # host. No runner is needed. An empty install set leaves harness_models
+        # empty → the standard "no routable" error below.
+        installed = installed_native_harnesses or set()
+        for h in _AUTO_NATIVE_ROUTING_HARNESSES:
+            if h not in installed:
                 continue
-            if worker_models:
-                # First worker wins for a given harness id (dedupe).
-                harness_models.setdefault(harness, worker_models)
-
-    # Fall back to the static table when the live catalog produced no
-    # routable candidates (e.g. a child session whose catalog only lists
-    # "self" under an unrecognized worker name, or the runner was unreachable).
-    if not harness_models:
-        for h in _AUTO_ROUTING_HARNESSES:
             models = infer_models(h)
             if models:
                 harness_models[h] = models
+    else:
+        # Fetch the live catalog. Its rows are keyed by worker name (sub-agent
+        # names + "self"), so normalize those to harness ids before matching
+        # against _AUTO_ROUTING_HARNESSES. Prefer catalog_session_id (the parent
+        # for a sub-agent) so the candidate set is the full spawnable-worker map,
+        # independent of whether the routed session is top-level or a sub-agent.
+        _catalog_sid = catalog_session_id or session_id
+        live_catalog: dict[str, list[str]] | None = None
+        if _catalog_sid and runner_client is not None:
+            live_catalog = await fetch_runner_models(_catalog_sid, runner_client)
+
+        # NOTE: we do NOT filter incompatible (harness, model) pairs out of the
+        # candidate set here. The external router (task_v0) enforces a required
+        # model set and 400s if any required model is missing, so dropping e.g.
+        # gpt-5-6-luna would break the whole request. Instead we send the full
+        # set and correct an incompatible verdict afterward via
+        # _redirect_incompatible_pick.
+        if live_catalog:
+            for worker_name, worker_models in live_catalog.items():
+                harness = _WORKER_NAME_TO_HARNESS.get(worker_name)
+                if harness is None or harness not in _AUTO_ROUTING_HARNESSES:
+                    continue
+                if worker_models:
+                    # First worker wins for a given harness id (dedupe).
+                    harness_models.setdefault(harness, worker_models)
+
+        # Fall back to the static table when the live catalog produced no
+        # routable candidates (e.g. a child session whose catalog only lists
+        # "self" under an unrecognized worker name, or the runner was unreachable).
+        if not harness_models:
+            for h in _AUTO_ROUTING_HARNESSES:
+                models = infer_models(h)
+                if models:
+                    harness_models[h] = models
 
     if not harness_models:
         return None, None, None, "No routable harnesses are available on this runner."
@@ -795,8 +833,12 @@ async def route_session_harness(
     # Redirect an incompatible (harness, model) pick the router may have
     # returned despite our filtered candidate set (some external routers
     # ignore it): a Claude model or gpt-5.5+ reasoning model on pi is
-    # redirected to claude-sdk / codex respectively.
-    _redirected = _redirect_incompatible_pick(chosen_harness, result.model)
+    # redirected to claude-sdk / codex respectively. Native routing keeps its
+    # pick verbatim — the redirect targets are SDK harnesses and would break the
+    # native terminal landing.
+    _redirected = (
+        chosen_harness if native else _redirect_incompatible_pick(chosen_harness, result.model)
+    )
     if _redirected != chosen_harness:
         _logger.info(
             "smart_routing: redirecting incompatible pick harness=%s model=%s -> harness=%s",
