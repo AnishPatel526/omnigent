@@ -157,6 +157,14 @@ _SUBMIT_VERIFY_TIMEOUT_S = 10.0
 # (so a slow-but-successful first Enter isn't double-tapped), short
 # enough that a swallowed Enter is retried promptly.
 _SUBMIT_RETRY_INTERVAL_S = 1.0
+# For an ``auto_confirm`` slash command (``/model`` / ``/effort``), how
+# long to keep re-sending the accept Enter and polling ``capture-pane``
+# for the confirmation dialog to clear and the input box to return,
+# before returning best-effort. Kept well under the server's 5s
+# ``model_change`` POST timeout so the settle completes inside the
+# awaited forward — the message inject that the server issues next then
+# never lands mid-switch (the "routing drops the first message" race).
+_SLASH_CONFIRM_SETTLE_TIMEOUT_S = 3.0
 # Claude Code collapses large pastes into this placeholder in the
 # input box instead of rendering the text itself.
 _PASTED_PLACEHOLDER_PREFIX = "[Pasted text"
@@ -2757,16 +2765,12 @@ def inject_slash_command(
     :param command: Single-line slash command including the leading
         ``/``, e.g. ``"/effort high"``.
     :param timeout_s: Seconds to wait for ``tmux.json``, e.g. ``30.0``.
-    :param auto_confirm: If ``True``, send an extra ``Enter`` after a
-        short delay to accept the default option of any TUI confirmation
-        dialog that the command may pop (e.g. ``/effort`` / ``/model``
-        prompt when switching invalidates the prompt cache). HACK —
-        the chat UI has no way to render the CLI's TUI dialog, so
-        without this the command silently stalls. Assumes the default
-        option is "accept" (true today for effort + model). When no
-        dialog appears, the extra Enter falls on an empty prompt and is
-        a no-op. Callers that don't trigger confirmations should leave
-        this ``False``.
+    :param auto_confirm: If ``True``, accept the command's Yes/No dialog
+        (``/effort`` / ``/model`` pop one) and block until it clears and
+        the input box returns — the server awaits this before forwarding
+        the next message, which would otherwise land in the open dialog.
+        Best-effort: returns anyway past ``_SLASH_CONFIRM_SETTLE_TIMEOUT_S``.
+        Leave ``False`` for commands that pop no dialog.
     :raises ValueError: If *command* is empty, does not start with
         ``/``, or contains a newline.
     :raises RuntimeError: If the tmux target is not advertised in
@@ -2777,20 +2781,36 @@ def inject_slash_command(
     if "\n" in command:
         raise ValueError("slash command must be a single line")
     info = _wait_for_tmux_info(bridge_dir, timeout_s=timeout_s)
+    socket_path = info["socket_path"]
+    tmux_target = info["tmux_target"]
     # ``C-u`` clears any draft the user is mid-typing; otherwise the
     # paste below concatenates with their text and Enter submits
     # ``<their-draft>/effort high`` as a turn. Unlike Escape it does
     # not interrupt an in-flight generation.
-    _run_tmux(info["socket_path"], "send-keys", "-t", info["tmux_target"], "C-u")
+    _run_tmux(socket_path, "send-keys", "-t", tmux_target, "C-u")
     # ``-l`` pastes ``/`` and spaces literally; trailing Enter submits.
-    _run_tmux(info["socket_path"], "send-keys", "-l", "-t", info["tmux_target"], command)
-    _run_tmux(info["socket_path"], "send-keys", "-t", info["tmux_target"], "Enter")
-    if auto_confirm:
-        # Give the TUI time to render its confirmation dialog before
-        # the auto-Enter arrives; otherwise the keystroke races the
-        # prompt and gets dropped.
-        time.sleep(0.3)
-        _run_tmux(info["socket_path"], "send-keys", "-t", info["tmux_target"], "Enter")
+    _run_tmux(socket_path, "send-keys", "-l", "-t", tmux_target, command)
+    _run_tmux(socket_path, "send-keys", "-t", tmux_target, "Enter")
+    if not auto_confirm:
+        return
+    # Re-send the accept Enter until the dialog clears and the input box
+    # is back, mirroring the verified submit in ``inject_user_message``. A
+    # blind ``sleep(0.3)`` + single Enter returned while the dialog could
+    # still be up, so the message the server forwards next was lost into
+    # it. C-u cleared any user draft, so a selected menu row is the dialog.
+    deadline = time.monotonic() + _SLASH_CONFIRM_SETTLE_TIMEOUT_S
+    last_enter = 0.0
+    while time.monotonic() < deadline:
+        if time.monotonic() - last_enter >= _SUBMIT_RETRY_INTERVAL_S:
+            _run_tmux(socket_path, "send-keys", "-t", tmux_target, "Enter")
+            last_enter = time.monotonic()
+        time.sleep(_CLAUDE_READY_POLL_INTERVAL_S)
+        pane = _capture_pane(socket_path, tmux_target)
+        if not _slash_confirm_dialog_open(pane) and _claude_prompt_rendered(pane):
+            return
+    # Never settled: return anyway. The persisted model_override applies on
+    # the next spawn; raising would 503 the model_change and block the
+    # message, worse than a possibly-unconfirmed switch.
 
 
 def display_cost_approval_popup(
@@ -3034,6 +3054,22 @@ def _is_selected_menu_row(line: str) -> bool:
     :returns: ``True`` when the line is a selected numbered menu choice.
     """
     return bool(_SELECTED_MENU_ROW_RE.match(line.strip()))
+
+
+def _slash_confirm_dialog_open(pane: str) -> bool:
+    """
+    Return whether a slash-command Yes/No dialog is still showing.
+
+    ``/model`` / ``/effort`` render their confirmation as a selected
+    numbered menu row (``❯ 1. Yes``), the shape
+    :func:`_is_selected_menu_row` detects; :func:`inject_slash_command`
+    polls this to know the dialog has cleared. Safe there because ``C-u``
+    cleared any user draft first, so such a row can only be the dialog.
+
+    :param pane: Captured pane text from :func:`_capture_pane`.
+    :returns: ``True`` while a selected numbered menu row is visible.
+    """
+    return any(_is_selected_menu_row(line) for line in pane.splitlines())
 
 
 def _is_box_rule(line: str) -> bool:

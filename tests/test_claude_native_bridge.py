@@ -3408,6 +3408,173 @@ def test_inject_slash_command_raises_when_tmux_target_never_published(
         )
 
 
+def test_inject_slash_command_without_auto_confirm_sends_no_extra_enter(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    ``auto_confirm=False`` returns after the submit Enter — no settle wait.
+
+    Commands that never pop a confirmation dialog must not pay the poll
+    loop's cost, and must not capture-pane at all. Exactly the three
+    keystroke calls (C-u + paste + Enter) and zero ``capture-pane`` reads.
+    """
+    bridge_dir = tmp_path / "bridge"
+    write_tmux_target(
+        bridge_dir,
+        socket_path=Path("/tmp/example/tmux.sock"),
+        tmux_target="claude:0.0",
+    )
+
+    calls: list[list[str]] = []
+
+    def _fake_run(cmd: list[str], **kwargs: object) -> SimpleNamespace:
+        """Record every tmux invocation; return rc=0."""
+        del kwargs
+        calls.append(cmd)
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr("subprocess.run", _fake_run)
+    claude_native_bridge.inject_slash_command(
+        bridge_dir, command="/effort high", auto_confirm=False
+    )
+
+    enters = [c for c in calls if c[-1] == "Enter"]
+    captures = [c for c in calls if "capture-pane" in c]
+    assert len(enters) == 1, f"Expected exactly one submit Enter, got {len(enters)}."
+    assert captures == [], "auto_confirm=False must not poll capture-pane."
+
+
+def test_inject_slash_command_auto_confirm_waits_for_dialog_to_settle(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    ``auto_confirm=True`` blocks until the confirmation dialog clears.
+
+    ``/model`` pops a Yes/No dialog rendered as a selected numbered menu
+    row (``❯ 1. Yes``). The old code fired one blind Enter after a fixed
+    0.3s sleep and returned — while the dialog could still be up. On a
+    routing turn the server forwards the user's message the instant this
+    returns, so a still-open dialog swallowed that message (the "routing
+    drops the first message on new claude-native" bug). The helper must
+    keep re-sending the accept Enter and polling ``capture-pane`` until
+    the menu row is gone AND the input box is back, so the switch is
+    fully settled before the caller (and thus the message inject) proceeds.
+
+    Here the fake TUI holds the dialog open across the first accept Enter
+    and clears it on the second; a regression to fire-and-forget would
+    return with the dialog still showing.
+    """
+    monkeypatch.setattr("omnigent.claude_native_bridge._TRUSTED_PARENT", tmp_path)
+    # Shrink cadences so the retry happens in milliseconds.
+    monkeypatch.setattr("omnigent.claude_native_bridge._CLAUDE_READY_POLL_INTERVAL_S", 0.01)
+    monkeypatch.setattr("omnigent.claude_native_bridge._SUBMIT_RETRY_INTERVAL_S", 0.0)
+    bridge_dir = tmp_path / "bridge"
+    write_tmux_target(
+        bridge_dir,
+        socket_path=Path("/tmp/example/tmux.sock"),
+        tmux_target="claude:0.0",
+    )
+
+    accept_enters: list[list[str]] = []
+    # State machine: the ``/model`` submit opens the confirmation dialog
+    # (a selected menu row); the FIRST accept Enter is swallowed (dialog
+    # stays); the second accepts it and the input box returns.
+    tui = {"pane": "❯ ", "opened": False, "accepts": 0}
+    _READY_BOX = "\n".join(["╭──────────╮", "│ ❯        │", "╰──────────╯"])
+
+    def _fake_run(cmd: list[str], **kwargs: object) -> SimpleNamespace:
+        """
+        Simulate a ``/model`` dialog that clears on the second accept.
+
+        :param cmd: Argv list passed to subprocess.run.
+        :param kwargs: Subprocess kwargs (ignored).
+        :returns: Fake CompletedProcess; capture-pane returns the current
+            simulated pane, other calls return rc=0.
+        """
+        del kwargs
+        if "capture-pane" in cmd:
+            return SimpleNamespace(returncode=0, stdout=tui["pane"], stderr="")
+        # The literal ``/model …`` paste + its submit Enter open the dialog.
+        if cmd[-1] == command:
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        if cmd[-1] == "Enter":
+            if not tui["opened"]:
+                # Submit Enter for the /model command → dialog opens.
+                tui["opened"] = True
+                tui["pane"] = "Switch model?\n❯ 1. Yes\n  2. No"
+            else:
+                # Accept Enter(s) for the dialog.
+                accept_enters.append(cmd)
+                tui["accepts"] += 1
+                if tui["accepts"] >= 2:
+                    tui["pane"] = _READY_BOX  # dialog cleared, input box back
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    command = "/model databricks-claude-haiku-4-5"
+    monkeypatch.setattr("subprocess.run", _fake_run)
+    claude_native_bridge.inject_slash_command(bridge_dir, command=command, auto_confirm=True)
+
+    # The dialog cleared only on the second accept, so the helper must
+    # have re-sent Enter at least twice. One accept means it regressed to
+    # fire-and-forget (the bug) and returned with the dialog still open.
+    assert len(accept_enters) >= 2, (
+        f"Expected the accept Enter to be re-sent until the dialog cleared, "
+        f"got {len(accept_enters)}."
+    )
+    assert not claude_native_bridge._slash_confirm_dialog_open(tui["pane"]), (
+        "inject_slash_command returned with the confirmation dialog still open."
+    )
+
+
+def test_inject_slash_command_auto_confirm_returns_best_effort_when_never_settles(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    A dialog that never clears returns best-effort (no raise, bounded).
+
+    If the confirmation never settles, raising would 503 the runner's
+    ``model_change`` forward and — on a routing turn — block the user's
+    message entirely. The persisted ``model_override`` is the
+    authoritative fallback (applied on the next spawn), so the helper
+    returns after ``_SLASH_CONFIRM_SETTLE_TIMEOUT_S`` instead. Bounded:
+    the call must not hang.
+    """
+    monkeypatch.setattr("omnigent.claude_native_bridge._TRUSTED_PARENT", tmp_path)
+    monkeypatch.setattr("omnigent.claude_native_bridge._CLAUDE_READY_POLL_INTERVAL_S", 0.01)
+    monkeypatch.setattr("omnigent.claude_native_bridge._SUBMIT_RETRY_INTERVAL_S", 0.0)
+    monkeypatch.setattr("omnigent.claude_native_bridge._SLASH_CONFIRM_SETTLE_TIMEOUT_S", 0.2)
+    bridge_dir = tmp_path / "bridge"
+    write_tmux_target(
+        bridge_dir,
+        socket_path=Path("/tmp/example/tmux.sock"),
+        tmux_target="claude:0.0",
+    )
+
+    # Dialog opens on the submit Enter and never clears afterward.
+    tui = {"pane": "❯ ", "opened": False}
+    command = "/model databricks-claude-haiku-4-5"
+
+    def _fake_run(cmd: list[str], **kwargs: object) -> SimpleNamespace:
+        """Simulate a wedged ``/model`` dialog that never clears."""
+        del kwargs
+        if "capture-pane" in cmd:
+            return SimpleNamespace(returncode=0, stdout=tui["pane"], stderr="")
+        if cmd[-1] == "Enter" and not tui["opened"] and tui["pane"] == "❯ ":
+            tui["opened"] = True
+            tui["pane"] = "Switch model?\n❯ 1. Yes\n  2. No"
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr("subprocess.run", _fake_run)
+    # Must return (not raise, not hang) — a wall-clock ceiling guards the
+    # bound; the shrunk settle timeout keeps it well under it.
+    start = time.monotonic()
+    claude_native_bridge.inject_slash_command(bridge_dir, command=command, auto_confirm=True)
+    assert time.monotonic() - start < 5.0, "inject_slash_command did not return within its bound."
+
+
 @pytest.mark.asyncio
 async def test_channel_server_relays_active_omnigent_tools(
     tmp_path: Path,
