@@ -977,8 +977,11 @@ def _persist_native_cumulative_usage(
 
     Unlike the Omnigent relay path (:func:`_accumulate_session_usage`), which adds
     per-response *deltas*, native harnesses (claude-native / codex-native)
-    report *cumulative* session usage — so this writes with SET semantics, not
-    add. The two paths never run for the same session, so they don't conflict.
+    report *cumulative* session usage — so the flat session fields are written
+    with SET semantics. The per-model ``by_model`` buckets are the exception:
+    they accumulate each report's growth (new - old) attributed to the active
+    model, so they stay correct across mid-session model switches (see below).
+    The two paths never run for the same session, so they don't conflict.
 
     Reads explicit cumulative fields from the ``external_session_usage`` event's
     ``data`` (all optional; a no-op when none are present):
@@ -1048,6 +1051,9 @@ def _persist_native_cumulative_usage(
     # label writes — usage was the missing half.)
     old_cost = float(current.get("total_cost_usd", 0.0) or 0.0)
     old_policy_cost = float(current.get("policy_cost_usd", 0.0) or 0.0)
+    # Old cumulative token totals, captured before the overwrites below so
+    # per-model attribution can add only this report's growth (new - old).
+    old_tokens = {key: int(current.get(key, 0) or 0) for key in _MODEL_TOKEN_KEYS}
     if cin is not None:
         # The reported input total is INCLUSIVE of cached tokens (codex's
         # ``inputTokens`` counts cache reads). Split the cached portion into
@@ -1115,23 +1121,19 @@ def _persist_native_cumulative_usage(
                 # priced cost below the persisted figure.
                 current["total_cost_usd"] = max(old_cost, compute_llm_cost(current, pricing))
 
-    # Per-model attribution (SET). Native harnesses report cumulative SESSION
-    # totals, not per-model splits, so attribute the running cumulative buckets
-    # to the current model. For the usual single-model native session this
-    # makes the per-model view equal the flat totals; on a mid-session model
-    # switch the current model absorbs the cumulative (splitting deferred —
-    # keyed on the raw harness model id). Cost mirrors the flat
-    # ``total_cost_usd`` so the per-model cost key is present iff priced.
-    # ``model_name`` is set on token-bearing AND cost-bearing broadcasts, so a
-    # claude-native cost-only broadcast attributes its cumulative cost here too
-    # (token buckets stay absent — claude-native reports no token counts).
+    # ADD this report's growth (new - old) to the active model, not the whole
+    # cumulative total, so per-model buckets sum to the flat total across model
+    # switches. Clamp >= 0 so a lowered report never claws a bucket back (flat
+    # tokens are SET not clamped, so buckets can exceed them then — fail-safe).
     if isinstance(model_name, str) and model_name:
         bucket = _model_usage_bucket(current, model_name)
         for key in _MODEL_TOKEN_KEYS:
             if key in current:
-                bucket[key] = current[key]
+                bucket[key] = int(bucket.get(key, 0)) + max(0, int(current[key]) - old_tokens[key])
         if "total_cost_usd" in current:
-            bucket["total_cost_usd"] = current["total_cost_usd"]
+            bucket["total_cost_usd"] = float(bucket.get("total_cost_usd", 0.0)) + max(
+                0.0, float(current["total_cost_usd"]) - old_cost
+            )
 
     # Enforcement value (claude-native display/policy split). Stored
     # separately from the displayed ``total_cost_usd`` so the gate can read
@@ -4811,6 +4813,8 @@ async def _evaluate_input_policy(
     _runner_router: RunnerRouter | None,
     *,
     actor: dict[str, str] | None = None,
+    file_store: FileStore | None = None,
+    artifact_store: ArtifactStore | None = None,
 ) -> dict[str, Any] | None:
     """
     Evaluate a user message against REQUEST (input) phase policy rules.
@@ -4846,7 +4850,13 @@ async def _evaluate_input_policy(
     """
 
     user_text = _extract_user_text_from_event(body)
-    if not user_text:
+    # A message with a text attachment (e.g. an uploaded CSV) may carry no typed
+    # text — those ``input_file`` blocks are decoded below and must not be skipped
+    # here. ``content`` being a list is the cheap precondition for that; the
+    # actual (blocking) decode is deferred until after the policy-skip check.
+    content_blocks = body.data.get("content")
+    has_content_blocks = isinstance(content_blocks, list) and len(content_blocks) > 0
+    if not user_text and not has_content_blocks:
         return None
 
     # Resolve the agent spec off the event loop (blocking DB + cold-cache
@@ -4862,12 +4872,35 @@ async def _evaluate_input_policy(
     if not spec.guardrails and not get_caps().default_policies and get_policy_store() is None:
         return None
 
+    # Text-like attachments (e.g. an uploaded CSV) arrive as ``input_file`` blocks
+    # base64-inlined straight to the model — they are NOT part of ``user_text`` and
+    # would otherwise reach the LLM unscanned. Decode their text here so
+    # request-phase policies (e.g. deny_pii_in_llm_request) scan the attachment
+    # content too. Deferred until after the skip check so a no-policy agent never
+    # pays the artifact fetch. Best-effort; only runs when stores are wired.
+    attachments: list[dict[str, str]] = []
+    if has_content_blocks and file_store is not None and artifact_store is not None:
+        from omnigent.runtime.content_resolver import extract_text_attachments
+
+        attachments = await asyncio.to_thread(
+            extract_text_attachments,
+            content_blocks,
+            file_store,
+            artifact_store,
+            session_id=session_id,
+        )
+    if not user_text and not attachments:
+        return None
+    # Structured request content ({"user_content", "attachments"}) so policies
+    # can reason about attachments per-file instead of a merged string.
+    request_content = {"user_content": user_text, "attachments": attachments}
+
     engine = await asyncio.to_thread(
         _build_policy_engine_from_spec, spec, session_id, conversation_store
     )
     ctx = EvaluationContext(
         phase=Phase.REQUEST,
-        content=user_text,
+        content=request_content,
         tool_name=None,
         actor=actor,
     )

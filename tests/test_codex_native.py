@@ -64,6 +64,14 @@ def _point_codex_auth_check_at(
         "_find_codex_cli",
         lambda: "/tmp/codex" if binary_present else None,
     )
+    if binary_present:
+        # The auth check now also validates the installed version. Treat a
+        # present binary as satisfying the version check so the tests focus
+        # on the auth-path decision.
+        monkeypatch.setattr(
+            "omnigent.onboarding.harness_install.harness_cli_installed",
+            lambda _key: True,
+        )
 
 
 def test_codex_auth_unavailable_reason_binary_missing(
@@ -5207,15 +5215,8 @@ def test_forwarder_skips_user_recovery_when_user_seen_live(tmp_path: Path) -> No
     assert fake_client.requests == []
 
 
-def test_forwarder_posts_codex_turn_plan_update(tmp_path: Path) -> None:
-    """
-    Codex ``turn/plan/updated`` notifications are visible in Omnigent web.
-
-    Plan mode emits plan state through a dedicated app-server
-    notification rather than assistant text. If the forwarder ignores
-    it, the terminal shows the plan while the web transcript appears to
-    skip straight to the final prompt.
-    """
+def test_forwarder_posts_codex_turn_plan_update_only_to_tasks(tmp_path: Path) -> None:
+    """Codex ``turn/plan/updated`` notifications update only the Tasks tab."""
     posted: list[dict[str, Any]] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -5250,57 +5251,14 @@ def test_forwarder_posts_codex_turn_plan_update(tmp_path: Path) -> None:
                         "threadId": "thread_123",
                         "turnId": "turn_123",
                         "explanation": None,
-                        "plan": [
-                            {"step": "Inspect Codex plan events", "status": "completed"},
-                            {"step": "Mirror plans to web", "status": "inProgress"},
-                            {"step": "Run checks", "status": "pending"},
-                        ],
+                        "plan": [{"step": "Inspect Codex plan events", "status": "pending"}],
                     },
                 },
             )
 
     asyncio.run(run())
 
-    # The plan is mirrored to the todo panel and inline in the transcript.
-    assert len(posted) == 2
-    todos_post = next(p for p in posted if p["type"] == "external_session_todos")
-    assert todos_post["data"]["todos"] == [
-        {
-            "content": "Inspect Codex plan events",
-            "status": "completed",
-            "activeForm": "Inspect Codex plan events",
-        },
-        {
-            "content": "Mirror plans to web",
-            "status": "in_progress",
-            "activeForm": "Mirror plans to web",
-        },
-        {
-            "content": "Run checks",
-            "status": "pending",
-            "activeForm": "Run checks",
-        },
-    ]
-
-    message_post = next(p for p in posted if p["type"] == "external_conversation_item")
-    data = message_post["data"]
-    assert data["item_type"] == "message"
-    assert data["response_id"] == "codex_turn_123"
-    assert data["item_data"] == {
-        "role": "assistant",
-        "agent": "codex-native-ui",
-        "content": [
-            {
-                "type": "output_text",
-                "text": (
-                    "Plan:\n"
-                    "- [x] Inspect Codex plan events\n"
-                    "- [~] Mirror plans to web\n"
-                    "- [ ] Run checks"
-                ),
-            }
-        ],
-    }
+    assert [event["type"] for event in posted] == ["external_session_todos"]
 
 
 def test_plan_todos_from_update_maps_steps_and_statuses() -> None:
