@@ -40,6 +40,7 @@ from omnigent.onboarding.ucode_setup import (
 if TYPE_CHECKING:
     from omnigent._runner_startup import RunnerStartupProgress
     from omnigent.onboarding.ambient import DetectedProvider
+    from omnigent.onboarding.openclaw_config import OpenClawDiscovery, SourceKind
     from omnigent.onboarding.provider_config import ProviderEntry
 
 # _INTERNAL_BETA_DEFAULT_SERVER (internal Databricks Apps host) moved to
@@ -52,22 +53,26 @@ if TYPE_CHECKING:
 _CLI_LOGIN_BRAND: dict[str, str] = {"claude": "Claude", "codex": "ChatGPT"}
 
 
-def _load_global_config(*a, **k):  # type: ignore[no-untyped-def]
+def _load_global_config() -> dict[str, Any]:  # type: ignore[explicit-any]
     import omnigent.cli as _cli
 
-    return _cli._load_global_config(*a, **k)
+    return _cli._load_global_config()
 
 
-def _save_global_config(*a, **k):  # type: ignore[no-untyped-def]
+def _save_global_config(  # type: ignore[explicit-any]
+    settings: collections.abc.Mapping[str, Any],
+    unset_keys: tuple[str, ...] = (),
+    deep_merge_keys: tuple[str, ...] = (),
+) -> None:
     import omnigent.cli as _cli
 
-    return _cli._save_global_config(*a, **k)
+    _cli._save_global_config(settings, unset_keys, deep_merge_keys)
 
 
-def _load_effective_config(*a, **k):  # type: ignore[no-untyped-def]
+def _load_effective_config() -> dict[str, Any]:  # type: ignore[explicit-any]
     import omnigent.cli as _cli
 
-    return _cli._load_effective_config(*a, **k)
+    return _cli._load_effective_config()
 
 
 # Node version hint shared by the preflight problem messages and surfaced
@@ -172,7 +177,7 @@ def _isolated_databricks_cfg() -> collections.abc.Generator[None, None, None]:
     import signal
     import tempfile
 
-    from omnigent.onboarding.internal_beta import DEFAULT_PROFILES
+    import omnigent.onboarding.internal_beta as internal_beta  # type: ignore[import-not-found]
     from omnigent.onboarding.setup import CONFLICTING_ENV_VARS
 
     original_cfg = Path.home() / ".databrickscfg"
@@ -198,7 +203,7 @@ def _isolated_databricks_cfg() -> collections.abc.Generator[None, None, None]:
     if original_cfg.exists():
         orig_cfg.read(original_cfg)
     cfg = configparser.ConfigParser()
-    for spec in DEFAULT_PROFILES:
+    for spec in internal_beta.DEFAULT_PROFILES:
         if orig_cfg.has_section(spec.name):
             cfg[spec.name] = dict(orig_cfg[spec.name])
 
@@ -240,7 +245,7 @@ def _isolated_databricks_cfg() -> collections.abc.Generator[None, None, None]:
         orig_cfg = configparser.ConfigParser()
         if original_cfg.exists():
             orig_cfg.read(original_cfg)
-        for spec in DEFAULT_PROFILES:
+        for spec in internal_beta.DEFAULT_PROFILES:
             if tmp_cfg.has_section(spec.name):
                 orig_cfg[spec.name] = dict(tmp_cfg[spec.name])
         write_tmp = original_cfg.with_suffix(".tmp")
@@ -727,8 +732,8 @@ def _configure_harness_add(family: str | None = None) -> str | None:
         # releases (e.g. a brand-new claude-sonnet-4-6 won't be listed yet), so
         # a fixed picker would block the user from a model they can actually
         # use. Pre-fill the canonical default and let the user type ANY model
-        # id. Blank → the default (or no pin when unknown). Always persisting
-        # a pin keeps a later re-add from silently dropping ``models.default``.
+        # id. Blank accepts a known catalog default; without one, the prompt
+        # requires an explicit model id.
         from omnigent.onboarding.providers import default_chat_model
 
         catalog_default = default_chat_model(provider)
@@ -859,9 +864,9 @@ def _configure_harness_add(family: str | None = None) -> str | None:
             wire_api = RESPONSES_WIRE_API if wire_choice == 0 else CHAT_WIRE_API
         # Default model per served surface. A gateway has NO catalog default,
         # so without a pin routing would fall back to a vendor model the
-        # gateway can't serve. The OpenAI surface pre-fills a broadly-served
-        # OSS default (moonshotai/kimi-k2.6, via the openrouter pin); the
-        # user can type any gateway model id.
+        # gateway can't serve. The OpenAI surface pre-fills the catalog's
+        # preferred Kimi-family model; if none is advertised, the user must
+        # type a gateway model id explicitly.
         from omnigent.onboarding.providers import default_chat_model
 
         models: dict[str, str] = {}
@@ -904,8 +909,8 @@ def _configure_harness_add(family: str | None = None) -> str | None:
         # usually not enabled on a Bedrock account, so pin an explicit id.
         default_model = (
             prompt_text(
-                "Default model (Bedrock inference-profile id, e.g. "
-                "us.anthropic.claude-opus-4-5-20251101-v1:0)"
+                "Default model (Bedrock inference-profile id or ARN; e.g. "
+                "us.vendor.model-family-YYYYMMDD-v1:0)"
             ).strip()
             or None
         )
@@ -1346,13 +1351,13 @@ def _prompt_install_harness(family: str) -> bool:
     from omnigent.onboarding.configure_models import family_label
     from omnigent.onboarding.harness_install import (
         harness_cli_version,
-        harness_install_command,
+        harness_install_display,
         install_harness_cli,
     )
     from omnigent.onboarding.interactive import console, select
 
     label = family_label(family)
-    cmd = " ".join(harness_install_command(family))
+    cmd = harness_install_display(family)
     detected_version, range_str = harness_cli_version(family)
     if detected_version is None:
         prompt = f"{label}'s CLI is missing. Install it now?"
@@ -1370,7 +1375,7 @@ def _prompt_install_harness(family: str) -> bool:
             "I'll run it myself (show the command)",
         ],
         descriptions=[
-            f"Runs `{cmd}` (needs npm), then continues to credential setup.",
+            f"Runs `{cmd}`, then continues to credential setup.",
             "Return to the harness picker without installing.",
             "Print the command so you can install it yourself, then return.",
         ],
@@ -1670,9 +1675,10 @@ def _manage_cursor_harness() -> None:
         from omnigent._platform import resolve_cli_binary
 
         cli_installed = harness_cli_installed(CURSOR_KEY)
+        install_spec = harness_install_spec(CURSOR_KEY)
         if cli_installed:
             cli_status = "logged in" if harness_cli_logged_in(CURSOR_KEY) else "needs login"
-        elif resolve_cli_binary(harness_install_spec(CURSOR_KEY).binary) is not None:
+        elif install_spec is not None and resolve_cli_binary(install_spec.binary) is not None:
             cli_status = "needs upgrade"
         else:
             cli_status = "not installed"
@@ -1746,40 +1752,54 @@ def _prompt_install_antigravity() -> str | None:
 
 
 def _manage_antigravity_harness() -> None:
-    """Run the level-2 loop for Antigravity: set / replace / remove its Gemini key.
+    """Run the level-2 loop for Antigravity auth.
 
-    Antigravity is Gemini-native (no provider family), so this manages just its
-    API key — stored in the secret store, referenced from the ``antigravity:``
-    config block — mirroring how the other harnesses persist api keys.
+    Antigravity can authenticate either through the native ``agy`` auth service
+    (Google sign-in for ``antigravity-native``) or through a Gemini API key for
+    the in-process SDK harness. The API key is stored in the secret store and
+    referenced from the ``antigravity:`` config block.
 
-    When the optional ``google-antigravity`` SDK is missing, the drill-in first offers
-    to install it (:func:`_prompt_install_antigravity`). Unlike the CLI-backed harnesses
-    (whose drill-in *gates* on the CLI), declining here still drops into the key menu,
-    since the ``antigravity:`` key is independently storable.
+    When both the optional ``google-antigravity`` SDK and ``agy`` are missing,
+    the drill-in first offers to install the SDK
+    (:func:`_prompt_install_antigravity`). An installed ``agy`` goes straight
+    to the auth choices so SDK setup never hides the native sign-in path.
 
-    :returns: None. Side effects: may install the ``antigravity`` extra, and may write
-        the ``antigravity:`` config block and the secret store.
+    :returns: None. Side effects: may launch ``agy``, install the
+        ``antigravity`` extra, and write the ``antigravity:`` config block and
+        secret store.
     """
     from omnigent.onboarding import secrets as secret_store
     from omnigent.onboarding.antigravity_auth import (
         ANTIGRAVITY_CONFIG_KEY,
+        ANTIGRAVITY_ENV_VARS,
         ANTIGRAVITY_SECRET_NAME,
         antigravity_api_key_configured,
         antigravity_api_key_ref,
         antigravity_sdk_installed,
     )
+    from omnigent.onboarding.harness_install import (
+        harness_cli_installed,
+        harness_cli_logged_in,
+        harness_install_spec,
+        harness_login,
+    )
     from omnigent.onboarding.interactive import select
+    from omnigent.onboarding.provider_config import GEMINI_FAMILY
 
     # Offer the install once on entry (not per loop iteration); the returned status
     # seeds the menu's transient status line.
     status: str | None = None
-    if not antigravity_sdk_installed():
+    if not antigravity_sdk_installed() and not harness_cli_installed(GEMINI_FAMILY):
         status = _prompt_install_antigravity()
         if status == _SOFT_INSTALL_ABORT:
             return
     while True:
         config = _load_global_config()
-        key_set = antigravity_api_key_configured(config)
+        key_set = antigravity_api_key_configured(config) or any(
+            os.environ.get(var) for var in ANTIGRAVITY_ENV_VARS
+        )
+        agy_installed = harness_cli_installed(GEMINI_FAMILY)
+        agy_signed_in = agy_installed and harness_cli_logged_in(GEMINI_FAMILY)
 
         rows: list[_HarnessMenuRow] = [
             _HarnessMenuRow(
@@ -1789,20 +1809,47 @@ def _manage_antigravity_harness() -> None:
         ]
         if key_set:
             rows.append(_HarnessMenuRow("Remove API key", action="remove_key"))
+        if agy_installed:
+            rows.append(
+                _HarnessMenuRow(
+                    "Re-run Antigravity sign-in" if agy_signed_in else "Sign in with Antigravity",
+                    action="sign_in",
+                )
+            )
+        else:
+            spec = harness_install_spec(GEMINI_FAMILY)
+            hint = spec.install_hint if spec is not None and spec.install_hint else "install agy"
+            rows.append(_HarnessMenuRow(f"Install agy first ({hint})", action="show_install"))
         rows.append(_HarnessMenuRow("← Back", action="back"))
 
-        header = (
-            "Antigravity — Gemini API key configured"
-            if key_set
-            else "Antigravity — no Gemini API key yet"
-        )
+        auth_bits: list[str] = []
+        if agy_signed_in:
+            auth_bits.append("Antigravity sign-in ready")
+        elif agy_installed:
+            auth_bits.append("Antigravity sign-in needed")
+        else:
+            auth_bits.append("agy not installed")
+        auth_bits.append("Gemini API key configured" if key_set else "no Gemini API key")
+        header = f"Antigravity — {' · '.join(auth_bits)}"
         idx = select(header, [r.label for r in rows], clear_on_exit=True, status=status)
         if idx < 0:  # Esc / q
             return
         action = rows[idx].action
         if action == "back":
             return
-        if action == "set_key":
+        if action == "show_install":
+            spec = harness_install_spec(GEMINI_FAMILY)
+            hint = (
+                spec.install_hint if spec is not None and spec.install_hint else "curl installer"
+            )
+            status = f"Install agy manually, then re-open: {hint}"
+        elif action == "sign_in":
+            status = (
+                "✓ Antigravity sign-in ready"
+                if harness_login(GEMINI_FAMILY)
+                else "✗ Antigravity sign-in not detected"
+            )
+        elif action == "set_key":
             status = _set_antigravity_api_key()
         elif action == "remove_key":
             ref = antigravity_api_key_ref(config)
@@ -2089,6 +2136,40 @@ def _launch_goose_configure() -> str | None:
     return "Provider not detected yet"
 
 
+def _show_acp_cli_harness(name: str) -> None:
+    """Show install + sign-in instructions for one builtin ACP CLI harness.
+
+    These harnesses own their credentials (``OWN_AUTH``) and install out-of-band,
+    so there is nothing for Omnigent to store or run on the user's behalf — the
+    drill-in reports what it can and names the two commands. Read-only: it
+    changes no config, which is why it's a display rather than a manage loop.
+
+    :param name: The :data:`ACP_CLI_HARNESSES` row key, e.g. ``"grok"``.
+    """
+    from omnigent._platform import resolve_cli_binary
+    from omnigent.acp_cli_harnesses import ACP_CLI_HARNESSES
+    from omnigent.onboarding.interactive import console
+
+    row = ACP_CLI_HARNESSES.get(name)
+    if row is None:  # defensive: a stale key from a concurrent config change
+        return
+
+    installed = resolve_cli_binary(row.binary) is not None
+    console.print(f"\n  [bold]{row.label}[/bold] — ACP agent (owns its own auth)")
+    if installed:
+        console.print(f"    ✓ `{row.binary}` found on PATH")
+    else:
+        hint = row.install.install_hint or row.binary
+        console.print(
+            f"    ○ `{row.binary}` not found. Install with:\n        [bold]{hint}[/bold]"
+        )
+    if row.login_command:
+        console.print(f"    Sign in with:\n        [bold]{row.login_command}[/bold]")
+    if row.install.auth_hint:
+        console.print(f"    {row.install.auth_hint}")
+    console.print(f"    Launch with: [bold]omnigent run --harness {name}[/bold]\n")
+
+
 def _manage_goose_harness() -> None:
     """Run the level-2 loop for Goose: ensure the CLI, then guide ``goose configure``.
 
@@ -2195,6 +2276,111 @@ def _add_acp_agent() -> None:
     entries.append(AcpAgentEntry(slug=slugify(name), name=name, command=command, model=model))
     _save_global_config(acp_agents_settings(entries))
     console.print(f"  ✓ Added {name}")
+
+
+def _display_openclaw_path(path: Path) -> str:
+    """Return a compact user-facing config path."""
+    try:
+        return f"~/{path.relative_to(Path.home())}"
+    except ValueError:
+        return str(path)
+
+
+def _choose_openclaw_source() -> OpenClawDiscovery | None:
+    """Choose an auto-detected or user-provided OpenClaw/acpx config."""
+    from omnigent.onboarding.interactive import prompt_text, select
+    from omnigent.onboarding.openclaw_config import (
+        default_config_paths,
+        openclaw_agents_to_acp_entries,
+        read_openclaw_config,
+    )
+
+    detected: list[OpenClawDiscovery] = []
+    options: list[str] = []
+    sources: tuple[SourceKind, SourceKind] = ("acpx", "openclaw")
+    for source, path in zip(sources, default_config_paths(), strict=True):
+        try:
+            exists = path.exists()
+        except OSError:
+            exists = True
+        if not exists:
+            continue
+        discovery = read_openclaw_config(path, source=source)
+        detected.append(discovery)
+        count = len(openclaw_agents_to_acp_entries(discovery.agents))
+        if count:
+            noun = "agent" if count == 1 else "agents"
+            hint = f"{count} {noun}"
+        elif discovery.errors:
+            hint = "unreadable"
+        else:
+            hint = "no agents"
+        options.append(f"{_display_openclaw_path(path)}  ·  {hint}")
+
+    custom_index = len(options)
+    options.extend(["Choose another file…", "← Back"])
+    choice = select("Import agents from OpenClaw", options, clear_on_exit=True)
+    if choice < 0 or choice == len(options) - 1:
+        return None
+    if choice < custom_index:
+        return detected[choice]
+
+    entered = prompt_text("OpenClaw/acpx config path").strip()
+    path = Path(os.path.expandvars(entered)).expanduser()
+    return read_openclaw_config(path)
+
+
+def _import_openclaw_agents() -> None:
+    """Import selected OpenClaw/acpx agents into the generic ``acp:`` block."""
+    from rich.markup import escape
+
+    from omnigent.onboarding.acp_auth import acp_agents_settings, command_binary_on_path
+    from omnigent.onboarding.interactive import console
+    from omnigent.onboarding.openclaw_config import (
+        merge_imported_acp_entries,
+        openclaw_agents_to_acp_entries,
+    )
+
+    while True:
+        discovery = _choose_openclaw_source()
+        if discovery is None:
+            return
+        if discovery.errors:
+            console.print("\n  [yellow]Some OpenClaw/acpx entries could not be read:[/yellow]")
+            for error in discovery.errors:
+                console.print(f"    • {escape(str(error.path))}")
+                console.print(f"      {escape(error.message)}")
+
+        imported = openclaw_agents_to_acp_entries(discovery.agents)
+        merged, added = merge_imported_acp_entries(imported)
+        if not imported:
+            console.print("  [yellow]No OpenClaw/acpx agents found in that file.[/yellow]")
+            continue
+        if not added:
+            console.print("  ✓ Those OpenClaw/acpx agents are already imported.")
+            continue
+
+        console.print("\n  [bold]OpenClaw/acpx agents found[/bold]")
+        for entry in added:
+            suffix = (
+                ""
+                if command_binary_on_path(entry.command)
+                else " [yellow](binary not found on PATH)[/yellow]"
+            )
+            console.print(
+                f"    • [bold]{escape(entry.name)}[/bold] → "
+                f"[dim]{escape(entry.command)}[/dim]{suffix}"
+            )
+        console.print("  [dim]Omnigent stores only these launch commands, not credentials.[/dim]")
+
+        if not click.confirm("Import coding agents from OpenClaw?", default=True):
+            console.print("  [yellow]Skipped OpenClaw import.[/yellow]")
+            return
+
+        _save_global_config(acp_agents_settings(merged))
+        noun = "agent" if len(added) == 1 else "agents"
+        console.print(f"  ✓ Imported {len(added)} OpenClaw/acpx {noun}.")
+        return
 
 
 def _manage_acp_agent(slug: str) -> None:
@@ -2397,29 +2583,30 @@ def _print_kimi_auth_help() -> None:
 def _manage_kimi_harness() -> None:
     """Run the level-2 loop for Kimi Code: install the CLI and drive ``kimi login``.
 
-    Unlike Qwen (which has no ``login`` subcommand), Kimi ships a real
-    ``kimi login`` (Moonshot OAuth or API key) and ``kimi logout``, so this
-    drill-in offers sign-in / sign-out directly. Kimi has no first-class
-    "am I logged in?" probe (its install spec sets ``status_args=None``), so
+    Kimi ships a real ``kimi login`` (Moonshot OAuth or API key), so this
+    drill-in offers sign-in directly. It has **no** ``kimi logout`` subcommand
+    (verified against kimi CLI v0.29.1), so there is no sign-out row — the user
+    clears credentials by removing kimi's own credential file. Kimi has no
+    first-class "am I logged in?" exit-code probe (its install spec sets
+    ``status_args=None``), so
     :func:`~omnigent.onboarding.harness_install.harness_cli_logged_in` always
     reports ``False`` for it — meaning ``harness_login`` runs ``kimi login``
     every time it is asked (the interactive flow lets the user cancel if
     already authenticated) and its boolean return is not a reliable success
-    signal. We therefore treat login / logout as best-effort side effects and
-    report that the flow finished rather than asserting an auth state.
+    signal. We therefore treat login as a best-effort side effect and report
+    that the flow finished rather than asserting an auth state.
 
     Like the other CLI-backed harnesses, a missing CLI gates the drill-in —
     there is nothing to configure for a harness you can't run.
 
     :returns: None. Side effects: may install the kimi CLI and run
-        ``kimi login`` / ``kimi logout`` in the foreground.
+        ``kimi login`` in the foreground.
     """
     from omnigent.onboarding.harness_install import (
         KIMI_KEY,
         harness_cli_installed,
         harness_install_spec,
         harness_login,
-        harness_logout,
     )
     from omnigent.onboarding.interactive import console, select
 
@@ -2442,7 +2629,6 @@ def _manage_kimi_harness() -> None:
     while True:
         rows: list[_HarnessMenuRow] = [
             _HarnessMenuRow("Sign in (kimi login)", action="login"),
-            _HarnessMenuRow("Sign out (kimi logout)", action="logout"),
             _HarnessMenuRow("Show auth options", action="help"),
             _HarnessMenuRow("← Back", action="back"),
         ]
@@ -2464,10 +2650,6 @@ def _manage_kimi_harness() -> None:
             console.print("  [dim]Signing in to Kimi (its login will open)…[/dim]")
             harness_login(KIMI_KEY)
             status = "kimi login flow finished — kimi stores its own credentials"
-        elif action == "logout":
-            console.print("  [dim]Signing out of Kimi…[/dim]")
-            harness_logout(KIMI_KEY)
-            status = "kimi logout flow finished"
         elif action == "help":
             _print_kimi_auth_help()
             status = None
@@ -2553,9 +2735,12 @@ def _manage_copilot_harness() -> None:
     from omnigent.onboarding.copilot_auth import (
         COPILOT_CONFIG_KEY,
         COPILOT_SECRET_NAME,
+        copilot_github_host,
         copilot_github_token_configured,
         copilot_github_token_ref,
         copilot_sdk_installed,
+        copilot_token_removal_settings,
+        gh_cli_github_token,
     )
     from omnigent.onboarding.interactive import select
 
@@ -2579,11 +2764,26 @@ def _manage_copilot_harness() -> None:
         ]
         if token_set:
             rows.append(_HarnessMenuRow("Remove GitHub token", action="remove_key"))
+        host = copilot_github_host(config)
+        rows.append(
+            _HarnessMenuRow(
+                f"Change GitHub Enterprise host ({host})"
+                if host
+                else "Set GitHub Enterprise host",
+                action="set_host",
+            )
+        )
+        if host:
+            rows.append(_HarnessMenuRow("Clear GitHub Enterprise host", action="clear_host"))
         rows.append(_HarnessMenuRow("← Back", action="back"))
 
-        header = (
-            "Copilot — GitHub token configured" if token_set else "Copilot — no GitHub token yet"
-        )
+        if token_set:
+            header = "Copilot — GitHub token configured"
+        elif gh_cli_github_token(host) is not None:
+            # No stored token, but a ``gh auth login`` session works as one.
+            header = "Copilot — using your GitHub CLI login"
+        else:
+            header = "Copilot — no GitHub token yet"
         idx = select(header, [r.label for r in rows], clear_on_exit=True, status=status)
         if idx < 0:  # Esc / q
             return
@@ -2592,6 +2792,13 @@ def _manage_copilot_harness() -> None:
             return
         if action == "set_key":
             status = _set_copilot_github_token()
+        elif action == "set_host":
+            status = _set_copilot_github_host()
+        elif action == "clear_host":
+            from omnigent.onboarding.copilot_auth import copilot_github_host_settings
+
+            _save_global_config(copilot_github_host_settings(None))
+            status = "✓ Cleared Copilot GitHub Enterprise host"
         elif action == "remove_key":
             ref = copilot_github_token_ref(config)
             # Only the secret we own (``keychain:copilot``) is ours to delete: a
@@ -2600,8 +2807,35 @@ def _manage_copilot_harness() -> None:
             # those cases just drop the config block and leave the secret.
             if ref == f"keychain:{COPILOT_SECRET_NAME}":
                 secret_store.delete_secret(COPILOT_SECRET_NAME)
-            _save_global_config({}, unset_keys=(COPILOT_CONFIG_KEY,))
+            # Keep a configured GHE host: the saver replaces the whole block, so
+            # unsetting it wholesale would discard the host along with the token.
+            if (remaining := copilot_token_removal_settings()) is not None:
+                _save_global_config(remaining)
+            else:
+                _save_global_config({}, unset_keys=(COPILOT_CONFIG_KEY,))
             status = "✓ Removed Copilot GitHub token"
+
+
+def _set_copilot_github_host() -> str | None:
+    """Prompt for and store the Copilot GitHub Enterprise host; return a status line.
+
+    Organizations reaching Copilot through a GHE (data-residency) instance need
+    auth and API calls pointed at their own hostname. Stored as
+    ``copilot.github_host`` and forwarded to the Copilot CLI as
+    ``COPILOT_GH_HOST``.
+
+    :returns: A status string for the menu, or ``None`` if the user aborted.
+    """
+    from omnigent.onboarding.copilot_auth import copilot_github_host_settings
+    from omnigent.onboarding.interactive import prompt_text
+
+    entered = prompt_text("GitHub Enterprise hostname (e.g. acme.ghe.com)").strip()
+    if not entered:
+        return None
+    _save_global_config(copilot_github_host_settings(entered))
+    from omnigent.onboarding.copilot_auth import copilot_github_host
+
+    return f"✓ Copilot GitHub Enterprise host set ({copilot_github_host()})"
 
 
 def _set_copilot_github_token() -> str | None:
@@ -3012,7 +3246,7 @@ def _set_opencode_default_model(current: str | None) -> str | None:
     if current is not None:
         clear_index = len(options)
         options.append("Clear default (use OpenCode's own default)")
-    default = models.index(current) if current in models else 0
+    default = models.index(current) if current is not None and current in models else 0
     # Even filtered to reachable providers the list can exceed the screen, so
     # bound the picker to a scrolling viewport sized to the terminal (leaving
     # room for the title / status / footer / "N more" markers).
@@ -3207,11 +3441,13 @@ def _run_configure_harnesses_interactive() -> None:
         harness_cli_installed,
         harness_cli_logged_in,
         harness_install_command,
+        harness_install_display,
         harness_install_spec,
     )
     from omnigent.onboarding.interactive import select
     from omnigent.onboarding.provider_config import (
         ANTHROPIC_FAMILY,
+        GEMINI_FAMILY,
         OPENAI_FAMILY,
         PI_SURFACE,
         surface_default_provider,
@@ -3267,11 +3503,13 @@ def _run_configure_harnesses_interactive() -> None:
     # own drill-in rather than ``_manage_harness_providers``.
     _KIMI = "\x00kimi"
     # Sentinels for the generic-ACP rows. Each configured agent gets its own row
-    # (``_ACP_AGENT_PREFIX + slug`` → per-agent remove drill-in); a single
-    # ``_ACP_ADD`` row jumps straight into the add flow. Not a provider family —
-    # each ACP agent owns its own auth.
+    # (``_ACP_AGENT_PREFIX + slug`` → per-agent remove drill-in); import/add rows
+    # jump straight into those flows. Not a provider family — each ACP agent owns
+    # its own auth.
+    _ACP_IMPORT = "\x00acp-import-openclaw"
     _ACP_ADD = "\x00acp-add"
     _ACP_AGENT_PREFIX = "\x00acp-agent:"
+    _ACP_CLI_PREFIX = "\x00acp-cli:"
     families = [ANTHROPIC_FAMILY, OPENAI_FAMILY, PI_SURFACE]
 
     # Status glyph + Rich color per readiness kind: "ready" is a configured,
@@ -3334,7 +3572,7 @@ def _run_configure_harnesses_interactive() -> None:
                 name,
                 _cli_absence_label(fam),
                 "missing",
-                _install_hint(" ".join(harness_install_command(fam))),
+                _install_hint(harness_install_display(fam)),
             )
         default = surface_default_provider(config, fam)
         if default is None:
@@ -3460,11 +3698,23 @@ def _run_configure_harnesses_interactive() -> None:
 
         rows.append(_family_row(PI_SURFACE))
 
-        # Antigravity — Gemini key (antigravity-sdk extra is soft, like Cursor).
+        # Antigravity — native agy sign-in OR Gemini key (SDK extra is soft, like Cursor).
         if antigravity_api_key_configured(config) or any(
             os.environ.get(v) for v in ANTIGRAVITY_ENV_VARS
         ):
             rows.append((_ANTIGRAVITY, "Antigravity", "Gemini API key", "ready", ""))
+        elif harness_cli_installed(GEMINI_FAMILY) and harness_cli_logged_in(GEMINI_FAMILY):
+            rows.append((_ANTIGRAVITY, "Antigravity", "Signed in", "ready", ""))
+        elif harness_cli_installed(GEMINI_FAMILY):
+            rows.append(
+                (
+                    _ANTIGRAVITY,
+                    "Antigravity",
+                    "Needs sign-in",
+                    "warn",
+                    "Open to sign in with Antigravity, or add a Gemini API key.",
+                ),
+            )
         elif not antigravity_sdk_installed():
             rows.append(
                 (
@@ -3482,7 +3732,7 @@ def _run_configure_harnesses_interactive() -> None:
                     "Antigravity",
                     "Not configured",
                     "warn",
-                    "Open to add the Gemini API key.",
+                    "Open to sign in with Antigravity, or add a Gemini API key.",
                 ),
             )
 
@@ -3537,6 +3787,39 @@ def _run_configure_harnesses_interactive() -> None:
                     (_GOOSE, "Goose", "Not configured", "warn", "Open to run `goose configure`."),
                 )
 
+        # Builtin ACP CLI harnesses (omnigent/acp_cli_harnesses.py) — vendor CLIs
+        # that speak ACP on stdio. Derived from the catalog so adding a row there
+        # surfaces it here too; without this they were addressable via
+        # `--harness <name>` but invisible in setup, making a shipped harness less
+        # discoverable than a user's own `acp:` entry.
+        from omnigent._platform import resolve_cli_binary
+        from omnigent.acp_cli_harnesses import ACP_CLI_HARNESSES
+
+        for _acp_cli_name, _acp_cli_row in sorted(ACP_CLI_HARNESSES.items()):
+            _acp_cli_key = _ACP_CLI_PREFIX + _acp_cli_name
+            if resolve_cli_binary(_acp_cli_row.binary) is None:
+                rows.append(
+                    (
+                        _acp_cli_key,
+                        _acp_cli_row.label,
+                        "Not installed",
+                        "missing",
+                        _install_hint(_acp_cli_row.install.install_hint or _acp_cli_row.binary),
+                    )
+                )
+            else:
+                # The vendor owns its auth, so we can report the binary is present
+                # but not whether it is signed in.
+                rows.append(
+                    (
+                        _acp_cli_key,
+                        _acp_cli_row.label,
+                        "ACP · own auth",
+                        "ready",
+                        "Select for install and sign-in instructions.",
+                    )
+                )
+
         # Copilot — GitHub token (github-copilot-sdk extra is soft).
         if copilot_github_token_configured(config) or any(
             os.environ.get(v) for v in COPILOT_TOKEN_ENV_VARS
@@ -3581,13 +3864,20 @@ def _run_configure_harnesses_interactive() -> None:
                 (_KIRO, "Kiro", _cli_absence_label(KIRO_KEY), "missing", _install_hint(kiro_hint))
             )
 
-        # Kimi Code — native CLI, own auth via `kimi login`; there is no local
-        # login status probe yet. Curl-installed (no npm package), so use its
-        # install_hint when absent and show "not configured" when present.
+        # Kimi Code — native CLI, own auth via `kimi login`. There is no CLI
+        # login-status probe, but `kimi login` writes a credential file, so a
+        # subprocess-free file check (`kimi_login_detected`) distinguishes
+        # "signed in" (green) from "installed but not configured" (yellow).
+        # Curl-installed (no npm package), so use its install_hint when absent.
         if harness_cli_installed(KIMI_KEY):
-            rows.append(
-                (_KIMI, "Kimi Code", "Not configured", "warn", "Sign in with `kimi login`.")
-            )
+            from omnigent.onboarding.kimi_auth import kimi_login_detected
+
+            if kimi_login_detected():
+                rows.append((_KIMI, "Kimi Code", "Signed in", "ready", ""))
+            else:
+                rows.append(
+                    (_KIMI, "Kimi Code", "Not configured", "warn", "Sign in with `kimi login`.")
+                )
         else:
             kimi_spec = harness_install_spec(KIMI_KEY)
             kimi_hint = (kimi_spec.install_hint if kimi_spec else None) or "see Kimi Code docs"
@@ -3607,8 +3897,15 @@ def _run_configure_harnesses_interactive() -> None:
         # harnesses, followed by an "Add" row that jumps straight into the add
         # flow. Not gated on a binary — each agent owns its own install.
         from omnigent.onboarding.acp_auth import acp_config_summary
+        from omnigent.onboarding.openclaw_config import (
+            discover_openclaw_agents,
+            openclaw_agents_to_acp_entries,
+        )
 
-        acp_summary = acp_config_summary()
+        try:
+            acp_summary = acp_config_summary()
+        except ValueError as exc:
+            raise click.ClickException(f"Invalid acp.agents configuration: {exc}") from exc
         for agent in acp_summary.agents:
             rows.append(
                 (
@@ -3619,6 +3916,23 @@ def _run_configure_harnesses_interactive() -> None:
                     "Select to remove this ACP agent.",
                 )
             )
+        openclaw_discovery = discover_openclaw_agents()
+        openclaw_imported = openclaw_agents_to_acp_entries(openclaw_discovery.agents)
+        count = len(openclaw_imported)
+        if count:
+            noun = "agent" if count == 1 else "agents"
+            import_status = f"{count} {noun} found automatically"
+        else:
+            import_status = ""
+        rows.append(
+            (
+                _ACP_IMPORT,
+                "Import from OpenClaw",
+                import_status,
+                "action",
+                "Choose a detected OpenClaw/acpx config or enter another path.",
+            )
+        )
         rows.append(
             (
                 _ACP_ADD,
@@ -3644,18 +3958,19 @@ def _run_configure_harnesses_interactive() -> None:
         # _render_menu prefixes selected rows with ``"    ❯  "`` (7 cells).
         # Cap the status text from the actual terminal width so verbose status
         # rows (e.g. OpenCode's provider summary) do not wrap in the compact
-        # single-line overview.
-        max_status_width = max(8, min(30, term_width - 7 - name_col - len("✓ ")))
+        # single-line overview. "Import from OpenClaw" can leave fewer than
+        # eight cells at the 40-column minimum, so the floor follows available space.
+        max_status_width = max(1, min(30, term_width - 7 - name_col - len("✓ ")))
         options: list[str] = []
         selectable: list[bool] = []
         row_target: list[str | None] = []
         descriptions: list[str] = []
-        for target, name, status_text, kind, desc in harness_rows:
+        for row_key, name, status_text, kind, desc in harness_rows:
             status_text = _truncate_cells(status_text, max_status_width)
             glyph, color = status_styles[kind]
             options.append(f"{name.ljust(name_col)}[{color}]{glyph} {escape(status_text)}[/]")
             selectable.append(True)
-            row_target.append(target)
+            row_target.append(row_key)
             descriptions.append(desc)
         options.append("Quit")
         selectable.append(True)
@@ -3671,30 +3986,34 @@ def _run_configure_harnesses_interactive() -> None:
         )
         if idx < 0:  # Esc / q — exit
             return
-        target = row_target[idx]
-        if target == CURSOR_KEY:
+        selected_target = row_target[idx]
+        if selected_target == CURSOR_KEY:
             _manage_cursor_harness()
-        elif target == COPILOT_KEY:
+        elif selected_target == COPILOT_KEY:
             _manage_copilot_harness()
-        elif target in families:
-            _manage_harness_providers(target)
-        elif target == _ANTIGRAVITY:
+        elif isinstance(selected_target, str) and selected_target in families:
+            _manage_harness_providers(selected_target)
+        elif selected_target == _ANTIGRAVITY:
             _manage_antigravity_harness()
-        elif target == _QWEN:
+        elif selected_target == _QWEN:
             _manage_qwen_harness()
-        elif target == _OPENCODE:
+        elif selected_target == _OPENCODE:
             _manage_opencode_harness()
-        elif target == _GOOSE:
+        elif selected_target == _GOOSE:
             _manage_goose_harness()
-        elif target == _ACP_ADD:
+        elif selected_target == _ACP_IMPORT:
+            _import_openclaw_agents()
+        elif selected_target == _ACP_ADD:
             _add_acp_agent()
-        elif isinstance(target, str) and target.startswith(_ACP_AGENT_PREFIX):
-            _manage_acp_agent(target[len(_ACP_AGENT_PREFIX) :])
-        elif target == _HERMES:
+        elif isinstance(selected_target, str) and selected_target.startswith(_ACP_AGENT_PREFIX):
+            _manage_acp_agent(selected_target[len(_ACP_AGENT_PREFIX) :])
+        elif isinstance(selected_target, str) and selected_target.startswith(_ACP_CLI_PREFIX):
+            _show_acp_cli_harness(selected_target[len(_ACP_CLI_PREFIX) :])
+        elif selected_target == _HERMES:
             _manage_hermes_harness()
-        elif target == _KIRO:
+        elif selected_target == _KIRO:
             _manage_kiro_harness()
-        elif target == _KIMI:
+        elif selected_target == _KIMI:
             _manage_kimi_harness()
         else:  # Quit row (or, defensively, a non-family row)
             return
