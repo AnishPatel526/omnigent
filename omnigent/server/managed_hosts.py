@@ -180,6 +180,7 @@ SUPPORTED_SANDBOX_PROVIDERS: frozenset[str] = frozenset(
         "e2b",
         "openshell",
         "kubernetes",
+        "agent_sandbox",
     }
 )
 PROVIDERS_WITH_MANAGED_LAUNCH: frozenset[str] = frozenset(
@@ -193,6 +194,7 @@ PROVIDERS_WITH_MANAGED_LAUNCH: frozenset[str] = frozenset(
         "e2b",
         "openshell",
         "kubernetes",
+        "agent_sandbox",
     }
 )
 
@@ -1237,7 +1239,11 @@ def _parse_single_provider_sandbox_config(raw: dict[str, object]) -> ManagedSand
             workspace=_parse_provider_string(raw, "openshell", "workspace"),
         )
         token_ttl_s = OPENSHELL_MANAGED_TOKEN_TTL_S
-    elif provider == "kubernetes":
+    elif provider in ("kubernetes", "agent_sandbox"):
+        # Both providers launch the same Pod and read the same
+        # `sandbox.kubernetes` block, so switching `sandbox.provider` between
+        # them needs no other config change. Only the enclosing workload kind
+        # and its reclamation differ (see the agent_sandbox launcher).
         kubernetes_section = _parse_provider_section(raw, "kubernetes")
         if kubernetes_section is not None:
             _reject_unknown_keys(
@@ -1263,6 +1269,7 @@ def _parse_single_provider_sandbox_config(raw: dict[str, object]) -> ManagedSand
         secret_mounts = _parse_kubernetes_secret_mounts(raw)
         _reject_overlapping_kubernetes_mounts(pvc_mounts, secret_mounts)
         launcher_factory = _kubernetes_launcher_factory(
+            agent_sandbox=provider == "agent_sandbox",
             image=_parse_provider_image(raw, "kubernetes"),
             env=_parse_provider_env(raw, "kubernetes"),
             namespace=_parse_provider_string(raw, "kubernetes", "namespace"),
@@ -2536,6 +2543,7 @@ def _reject_overlapping_kubernetes_mounts(
 
 def _kubernetes_launcher_factory(
     *,
+    agent_sandbox: bool = False,
     image: str | None,
     env: list[str] | None,
     namespace: str | None,
@@ -2553,6 +2561,9 @@ def _kubernetes_launcher_factory(
     """
     Build the launcher factory for the YAML ``provider: kubernetes`` path.
 
+    :param agent_sandbox: Launch each Pod inside an agent-sandbox ``Sandbox``
+        custom resource (``provider: agent_sandbox``) rather than a ``Job``,
+        which makes the sandbox reclaim itself once no runner keeps it alive.
     :param image: Registry image with omnigent pre-installed, or ``None`` for
         the official prebaked host image (env-overridable).
     :param env: Names of server-process environment variables injected into
@@ -2590,7 +2601,12 @@ def _kubernetes_launcher_factory(
         """Construct the Kubernetes launcher (lazy SDK import inside)."""
         from omnigent.onboarding.sandboxes.kubernetes import KubernetesSandboxLauncher
 
-        return KubernetesSandboxLauncher(
+        launcher_cls: type[KubernetesSandboxLauncher] = KubernetesSandboxLauncher
+        if agent_sandbox:
+            from omnigent.onboarding.sandboxes.agent_sandbox import AgentSandboxLauncher
+
+            launcher_cls = AgentSandboxLauncher
+        return launcher_cls(
             image=image,
             env=env,
             namespace=namespace,

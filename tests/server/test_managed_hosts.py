@@ -3805,3 +3805,35 @@ def test_builtin_without_a_branch_is_unaffected_by_the_registry(
     assert cfg.default.managed_launch_supported is False
     with pytest.raises(HTTPException):
         cfg.default.launcher_factory()
+
+
+def test_agent_sandbox_reuses_the_kubernetes_config_block() -> None:
+    """
+    `provider: agent_sandbox` reads the same `sandbox.kubernetes` block as the
+    Job provider, so switching between them needs no other config change, and
+    builds the agent-sandbox launcher.
+    """
+    from omnigent.onboarding.sandboxes.agent_sandbox import AgentSandboxLauncher
+
+    cfg = parse_sandbox_config(
+        {
+            "provider": "agent_sandbox",
+            "server_url": "http://omnigent.omnigent.svc.cluster.local/",
+            "kubernetes": {
+                "namespace": "omnigent-sandboxes",
+                "secret_name": "omnigent-creds",
+                "in_cluster": True,
+            },
+        }
+    )
+    assert cfg is not None
+    cfg = cfg.default
+    assert cfg.provider == "agent_sandbox"
+    assert cfg.managed_launch_supported is True
+    assert cfg.token_ttl_s == KUBERNETES_MANAGED_TOKEN_TTL_S
+    launcher = cfg.launcher_factory()
+    assert isinstance(launcher, AgentSandboxLauncher)
+    assert launcher.provider == "agent_sandbox"
+    # keep_alive is what the managed path needs from it, so it must not be the
+    # raising capability default it inherits two levels up.
+    assert type(launcher).keep_alive is not SandboxHostLauncher.keep_alive
