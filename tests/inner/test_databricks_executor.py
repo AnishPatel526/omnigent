@@ -2048,6 +2048,8 @@ def test_read_databrickscfg_fallback_tolerates_duplicate_default_section(
 
     # The host-only reader must survive the same file too.
     assert _read_databrickscfg_host() == "https://second.cloud.databricks.com"
+
+
 def test_databrickscfg_workspace_id_for_host_reads_matching_profile(
     tmp_path: _Path, monkeypatch: pytest.MonkeyPatch, clean_databricks_env: None
 ) -> None:
