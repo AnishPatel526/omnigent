@@ -210,7 +210,7 @@ def _read_databrickscfg_file_fallback(profile: str | None = None) -> DatabricksC
 
     # strict=False tolerates the duplicate sections/keys that some tools (e.g. the
     # Databricks VS Code extension) write into ~/.databrickscfg; the last value wins,
-    # matching the databricks-sdk. Strict parsing raised DuplicateOptionError (#3284).
+    # matching the databricks-sdk. Strict parsing raised DuplicateOptionError.
     config = configparser.ConfigParser(strict=False)
     config.read(cfg_path)
 
@@ -347,7 +347,7 @@ def _read_databrickscfg_host(profile: str | None = None) -> str | None:
     if not cfg_path.exists():
         return None
 
-    # strict=False: tolerate duplicate sections/keys in ~/.databrickscfg (see #3284).
+    # strict=False: tolerate duplicate sections/keys in ~/.databrickscfg.
     config = configparser.ConfigParser(strict=False)
     config.read(cfg_path)
 
@@ -799,7 +799,7 @@ def _databrickscfg_profiles_for_host(host: str) -> list[str]:
     cfg_path = Path(os.environ.get("DATABRICKS_CONFIG_FILE") or (Path.home() / ".databrickscfg"))
     if not cfg_path.exists():
         return []
-    # strict=False: tolerate duplicate sections/keys in ~/.databrickscfg (see #3284).
+    # strict=False: tolerate duplicate sections/keys in ~/.databrickscfg.
     config = configparser.ConfigParser(strict=False)
     try:
         config.read(cfg_path)
@@ -838,7 +838,8 @@ def databrickscfg_workspace_id_for_host(host: str) -> str | None:
     cfg_path = Path(os.environ.get("DATABRICKS_CONFIG_FILE") or (Path.home() / ".databrickscfg"))
     if not cfg_path.exists():
         return None
-    config = configparser.ConfigParser()
+    # strict=False: tolerate duplicate sections/keys in ~/.databrickscfg.
+    config = configparser.ConfigParser(strict=False)
     try:
         config.read(cfg_path)
     except configparser.Error:
@@ -859,7 +860,8 @@ def databrickscfg_workspace_id_for_profile(profile: str) -> str | None:
     cfg_path = Path(os.environ.get("DATABRICKS_CONFIG_FILE") or (Path.home() / ".databrickscfg"))
     if not cfg_path.exists():
         return None
-    config = configparser.ConfigParser()
+    # strict=False: tolerate duplicate sections/keys in ~/.databrickscfg.
+    config = configparser.ConfigParser(strict=False)
     try:
         config.read(cfg_path)
     except configparser.Error:
