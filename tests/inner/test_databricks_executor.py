@@ -2081,6 +2081,73 @@ def test_workspace_id_helpers_tolerate_duplicate_default_section(
     )
 
 
+def _write_duplicate_default_cfg(tmp_path: _Path, monkeypatch: pytest.MonkeyPatch) -> _Path:
+    """Point ``DATABRICKS_CONFIG_FILE`` at a cfg whose ``[DEFAULT]`` block repeats."""
+    cfg_path = tmp_path / "databrickscfg"
+    cfg_path.write_text(
+        textwrap.dedent(
+            """
+            [DEFAULT]
+            host = https://first.cloud.databricks.com
+            token = dapi-first
+
+            [DEFAULT]
+            host = https://second.cloud.databricks.com
+            token = dapi-second
+            """
+        ).lstrip()
+    )
+    monkeypatch.setenv("DATABRICKS_CONFIG_FILE", str(cfg_path))
+    return cfg_path
+
+
+@pytest.mark.parametrize("profile", [None, "DEFAULT"], ids=["ambient", "explicit-default"])
+def test_read_databrickscfg_falls_back_when_sdk_rejects_duplicate_default_section(
+    profile: str | None,
+    tmp_path: _Path,
+    monkeypatch: pytest.MonkeyPatch,
+    clean_databricks_env: None,
+) -> None:
+    """
+    The real SDK ``Config`` parses ``~/.databrickscfg`` with a strict
+    ``ConfigParser`` and raises ``configparser.DuplicateOptionError`` (not a
+    ``ValueError``) on a duplicated ``[DEFAULT]``. The wrapper must treat that
+    like any other SDK resolution failure and fall through to the tolerant
+    file reader instead of letting the parse error escape to the caller.
+    """
+    _write_duplicate_default_cfg(tmp_path, monkeypatch)
+
+    creds = _read_databrickscfg(profile)
+
+    assert creds is not None
+    assert creds.host == "https://second.cloud.databricks.com"
+    assert creds.token == "dapi-second"
+
+
+def test_resolve_databricks_auth_uses_pat_when_sdk_rejects_duplicate_default_section(
+    tmp_path: _Path,
+    monkeypatch: pytest.MonkeyPatch,
+    clean_databricks_env: None,
+) -> None:
+    """
+    Same duplicated ``[DEFAULT]`` on the per-request auth path: the SDK's
+    parse error must fall through to the static-PAT fallback rather than
+    surface as a misleading "run databricks auth login" failure.
+    """
+    from omnigent.inner.databricks_executor import (
+        _DatabricksBearerAuth,
+        _resolve_databricks_auth,
+    )
+
+    _write_duplicate_default_cfg(tmp_path, monkeypatch)
+
+    auth, host = _resolve_databricks_auth()
+
+    assert isinstance(auth, _DatabricksBearerAuth)
+    assert host == "https://second.cloud.databricks.com"
+    assert auth.current_token() == "dapi-second"
+
+
 def test_databrickscfg_workspace_id_for_host_reads_matching_profile(
     tmp_path: _Path, monkeypatch: pytest.MonkeyPatch, clean_databricks_env: None
 ) -> None:

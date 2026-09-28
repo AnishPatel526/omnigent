@@ -311,7 +311,10 @@ def _call_sdk_authenticate(profile: str | None) -> WorkspaceCreds | None:
     try:
         cfg = Config(profile=sdk_profile)
         headers = cfg.authenticate()
-    except ValueError as exc:
+    except (ValueError, configparser.Error) as exc:
+        # configparser.Error: the SDK parses the file strictly, so a
+        # duplicated section/key lands here too and falls through to the
+        # tolerant configparser path below.
         # INFO (not WARNING): expired tokens raise here. WARNING would
         # surface via root's lastResort handler to stderr, drowning the
         # clean ClickException. INFO still lands in cli-*.log.

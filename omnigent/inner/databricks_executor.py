@@ -133,6 +133,8 @@ def _read_databrickscfg(profile: str | None = None) -> DatabricksCredentials | N
        by non-executor callers that only need a one-shot credential
        check.
     """
+    import configparser
+
     try:
         from databricks.sdk.config import Config
     except ImportError:
@@ -145,11 +147,14 @@ def _read_databrickscfg(profile: str | None = None) -> DatabricksCredentials | N
     try:
         cfg = Config(profile=sdk_profile)
         headers = cfg.authenticate()
-    except ValueError as profile_exc:
+    except (ValueError, configparser.Error) as profile_exc:
         # ValueError is what Config raises for every user-facing resolution
         # failure (missing profile, malformed file, no credentials in env,
-        # unknown auth_type, etc.). Anything else (e.g. network errors
-        # fetching OAuth tokens) should propagate.
+        # unknown auth_type, etc.). The SDK parses the config file with a
+        # strict ConfigParser, so a duplicated section or key (the shape the
+        # Databricks VS Code extension writes) surfaces as configparser.Error
+        # instead; the file fallback tolerates it. Anything else (e.g. network
+        # errors fetching OAuth tokens) should propagate.
         logger.debug(
             "databricks-sdk credential resolution failed for profile %r: %s",
             sdk_profile,
@@ -164,7 +169,7 @@ def _read_databrickscfg(profile: str | None = None) -> DatabricksCredentials | N
             try:
                 cfg = Config()
                 headers = cfg.authenticate()
-            except ValueError:
+            except (ValueError, configparser.Error):
                 return _read_databrickscfg_file_fallback(profile)
         else:
             return _read_databrickscfg_file_fallback(profile)
@@ -648,6 +653,8 @@ def _resolve_databricks_auth(
         installed.
     :raises ValueError: When both ``profile`` and ``host`` are given.
     """
+    import configparser
+
     try:
         from databricks.sdk.config import Config
     except ImportError as exc:
@@ -667,7 +674,9 @@ def _resolve_databricks_auth(
     try:
         cfg = Config(profile=sdk_profile)
         cfg.authenticate()
-    except ValueError:
+    except (ValueError, configparser.Error):
+        # configparser.Error: the SDK's strict parser rejected the config file
+        # (e.g. a duplicated [DEFAULT]); the file fallback below tolerates it.
         if profile is None and sdk_profile is not None:
             # Profile name came from the DATABRICKS_CONFIG_PROFILE env var,
             # not from an explicit profile argument.  Fall back to the
@@ -687,7 +696,7 @@ def _resolve_databricks_auth(
             try:
                 cfg = Config()
                 cfg.authenticate()
-            except ValueError:
+            except (ValueError, configparser.Error):
                 cfg = None
         else:
             cfg = None
