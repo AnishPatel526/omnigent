@@ -36,16 +36,14 @@ pexpect = pytest.importorskip("pexpect")
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 
-# A crash would surface right after the local server boots (a few seconds);
-# a healthy launch proceeds into runner bring-up, which can take up to ~106s
-# worst case (see the launch-budget note in test_repl_approval_e2e.py), so the
-# ceiling only bounds the healthy path.
+# A crash surfaces seconds after the local server boots; a healthy launch runs
+# into runner bring-up (up to ~106s worst case, see test_repl_approval_e2e.py),
+# so the ceiling only bounds the healthy path.
 _LAUNCH_TIMEOUT_S = 120
 
-# Ambient credentials and proxy settings that would change the credential
-# chain or route the loopback server through a proxy. ``OMNIGENT_*`` is
-# cleared by prefix: auth-mode switches, state dirs and runner/host identity
-# leaked by a server-spawned runner all change launch behavior.
+# Ambient credentials and proxy settings that would change the credential chain
+# or route the loopback server through a proxy; ``OMNIGENT_*`` (auth modes,
+# state dirs, leaked runner/host identity) is cleared by prefix.
 _ENV_TO_CLEAR = (
     "DATABRICKS_HOST",
     "DATABRICKS_TOKEN",

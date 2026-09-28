@@ -148,13 +148,9 @@ def _read_databrickscfg(profile: str | None = None) -> DatabricksCredentials | N
         cfg = Config(profile=sdk_profile)
         headers = cfg.authenticate()
     except (ValueError, configparser.Error) as profile_exc:
-        # ValueError is what Config raises for every user-facing resolution
-        # failure (missing profile, malformed file, no credentials in env,
-        # unknown auth_type, etc.). The SDK parses the config file with a
-        # strict ConfigParser, so a duplicated section or key (the shape the
-        # Databricks VS Code extension writes) surfaces as configparser.Error
-        # instead; the file fallback tolerates it. Anything else (e.g. network
-        # errors fetching OAuth tokens) should propagate.
+        # Config raises ValueError for user-facing resolution failures; its
+        # strict ConfigParser raises configparser.Error on a duplicated section
+        # or key, which the file fallback tolerates. Anything else propagates.
         logger.debug(
             "databricks-sdk credential resolution failed for profile %r: %s",
             sdk_profile,
