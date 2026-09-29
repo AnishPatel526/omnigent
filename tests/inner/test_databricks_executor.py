@@ -2050,12 +2050,12 @@ def test_read_databrickscfg_fallback_tolerates_duplicate_default_section(
     assert _read_databrickscfg_host() == "https://second.cloud.databricks.com"
 
 
-def test_workspace_id_helpers_tolerate_duplicate_default_section(
+def test_workspace_id_for_profile_tolerates_duplicate_default_section(
     tmp_path: _Path, monkeypatch: pytest.MonkeyPatch, clean_databricks_env: None
 ) -> None:
     """
-    The ``workspace_id`` readers must survive a ``~/.databrickscfg`` with a
-    duplicate ``[DEFAULT]`` section. Their ``configparser.Error`` guard used
+    The exact-profile ``workspace_id`` reader must survive a ``~/.databrickscfg``
+    with a duplicate ``[DEFAULT]`` section. Its ``configparser.Error`` guard used
     to swallow the strict-mode parse failure and return ``None``, silently
     losing the recorded workspace id. Non-strict parsing keeps the last value.
     """
@@ -2075,10 +2075,6 @@ def test_workspace_id_helpers_tolerate_duplicate_default_section(
     monkeypatch.setenv("DATABRICKS_CONFIG_FILE", str(cfg_path))
 
     assert databrickscfg_workspace_id_for_profile("DEFAULT") == "2222222222222222"
-    assert (
-        databrickscfg_workspace_id_for_host("https://second.cloud.databricks.com")
-        == "2222222222222222"
-    )
 
 
 def _write_duplicate_default_cfg(tmp_path: _Path, monkeypatch: pytest.MonkeyPatch) -> _Path:

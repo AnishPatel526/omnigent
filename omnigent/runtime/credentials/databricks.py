@@ -312,9 +312,7 @@ def _call_sdk_authenticate(profile: str | None) -> WorkspaceCreds | None:
         cfg = Config(profile=sdk_profile)
         headers = cfg.authenticate()
     except (ValueError, configparser.Error) as exc:
-        # configparser.Error: the SDK parses the file strictly, so a
-        # duplicated section/key lands here too and falls through to the
-        # tolerant configparser path below.
+        # configparser.Error: the SDK parses strictly; the cfg path below tolerates duplicates.
         # INFO (not WARNING): expired tokens raise here. WARNING would
         # surface via root's lastResort handler to stderr, drowning the
         # clean ClickException. INFO still lands in cli-*.log.
@@ -400,9 +398,8 @@ def _try_resolve_from_cfg(profile: str | None, cfg_path: Path) -> WorkspaceCreds
     if not cfg_path.exists():
         return None
 
-    # strict=False: tolerate duplicate sections/keys in ~/.databrickscfg (e.g.
-    # written by the Databricks VS Code extension); the last value wins,
-    # matching the databricks-sdk and the executor's file readers.
+    # strict=False: tolerate the duplicated [DEFAULT] some tools (e.g. the Databricks
+    # VS Code extension) leave in ~/.databrickscfg; the last value wins.
     config = configparser.ConfigParser(strict=False)
     config.read(cfg_path)
 
