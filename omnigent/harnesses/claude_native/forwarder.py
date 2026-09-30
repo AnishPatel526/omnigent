@@ -1803,6 +1803,12 @@ def _external_conversation_item_event(item: ClaudeTranscriptItem) -> dict[str, o
             "item_type": item.item_type,
             "item_data": item.data,
             "response_id": item.response_id,
+            **(
+                {"subagent_return_id": item.subagent_return_id}
+                if item.subagent_return_id is not None
+                else {}
+            ),
+            **({"agent_message_candidate": True} if item.agent_message_candidate else {}),
         },
     }
 
@@ -5160,6 +5166,12 @@ async def _post_external_conversation_item(
                     # the server derives the item's id from this and treats
                     # a re-post as a no-op instead of a duplicate.
                     "source_id": item.source_id,
+                    **(
+                        {"subagent_return_id": item.subagent_return_id}
+                        if item.subagent_return_id is not None
+                        else {}
+                    ),
+                    **({"agent_message_candidate": True} if item.agent_message_candidate else {}),
                 },
             },
         )

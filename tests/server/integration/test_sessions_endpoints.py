@@ -327,6 +327,11 @@ async def test_create_titled_session_keeps_title_after_first_message(
     snapshot = await client.get(f"/v1/sessions/{session['id']}")
     assert snapshot.json()["title"] == "canvas-layout"
 
+    items = (await client.get(f"/v1/sessions/{session['id']}/items")).json()["data"]
+    message = next(item for item in items if item.get("role") == "user")
+    assert message["user_authored"] is True
+    assert not message.get("is_meta")
+
 
 async def test_sidebar_rename_wins_in_flight_background_title(
     client: httpx.AsyncClient,
@@ -11683,6 +11688,10 @@ async def test_external_codex_subagent_start_is_idempotent_and_upserts_labels(
     )
     assert first.status_code == 202, first.text
     child_id_first = first.json()["child_session_id"]
+    first_items = (await client.get(f"/v1/sessions/{parent['id']}/items")).json()["data"]
+    assert not any(
+        item.get("event_type") == "session.subagent.delegated" for item in first_items
+    ), "The sparse registration must not freeze the Started notice with a generic Codex name"
 
     # Second registration — richer (nickname/role added from resume).
     second = await client.post(
@@ -11716,6 +11725,13 @@ async def test_external_codex_subagent_start_is_idempotent_and_upserts_labels(
     assert matching[0]["tool"] == "Euclid", (
         f"Expected tool='Euclid' after nickname upsert; got {matching[0]['tool']!r}"
     )
+    parent_items = (await client.get(f"/v1/sessions/{parent['id']}/items")).json()["data"]
+    activity = [
+        item for item in parent_items if item.get("event_type") == "session.subagent.delegated"
+    ]
+    assert len(activity) == 1
+    assert activity[0]["resource_id"] == child_id_first
+    assert activity[0]["resource"] == {"title": "Euclid"}
 
 
 # ── POST /v1/sessions/{id}/events external_antigravity_subagent_start ────────
