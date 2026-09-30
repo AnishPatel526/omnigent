@@ -160,6 +160,7 @@ function loadNavigationHarness({
       isPackaged: false,
       getPath: () => userData,
       setName: () => {},
+      setPath: () => {},
       setBadgeCount: () => true,
       requestSingleInstanceLock: () => true,
       on: (eventName, listener) => appEvents.set(eventName, listener),

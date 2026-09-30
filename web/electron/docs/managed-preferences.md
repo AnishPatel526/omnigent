@@ -143,10 +143,12 @@ Replace the example organization identifiers and UUIDs before deployment.
 
 ## Local verification
 
-For development only, the effective preference can be simulated with
-`defaults` while a **packaged Omnigent app** is closed. An unpackaged
-`electron .` / `just electron-dev` process uses Electron's development bundle
-identifier, not `ai.omnigent.desktop`, so it will not see this value:
+For local verification, set the preference in the domain for the app you run.
+Packaged release builds use `ai.omnigent.desktop`; packaged local builds and
+`just electron-dev` use `ai.omnigent.desktop-dev`. The unpackaged Electron
+binary retains Electron's bundle identifier, so the shell reads the dev domain
+explicitly via `defaults` (packaged builds use Electron's native user defaults
+API). For example, with a release build closed:
 
 ```bash
 defaults write ai.omnigent.desktop serverUrls -array \
@@ -165,5 +167,6 @@ defaults delete ai.omnigent.desktop serverNames
 defaults delete ai.omnigent.desktop databricksInternalFeaturesEnabled
 ```
 
+For development, substitute `ai.omnigent.desktop-dev` in the commands above.
 Production deployment should use an MDM-forced preference rather than a local
 user default.

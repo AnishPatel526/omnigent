@@ -38,6 +38,7 @@ const { registerFileReveal } = require("./fileReveal");
 const fs = require("node:fs");
 const path = require("node:path");
 const { pathToFileURL } = require("node:url");
+const { omnigentBuild } = require("../package.json");
 const { execFile } = require("node:child_process");
 const { registerLocalhostCors } = require("./localhost_cors");
 const {
@@ -65,6 +66,7 @@ const { createBrowserViewRegistry } = require("./browserViewRegistry");
 const { createBrowserViewBoundsController } = require("./browserViewBounds");
 const { registerBrowserIpc } = require("./browserIpc");
 const { isDeveloperModeEnabled } = require("./developer_mode");
+const { DEV_DOMAIN, getDevUserDefault } = require("./dev_preferences");
 const {
   excludingManagedServers,
   getDatabricksInternalFeaturesEnabled,
@@ -248,41 +250,29 @@ const POPUP_PRELOAD = path.join(__dirname, "popup_preload.js");
 /** Absolute path to the app icon (PNG works for the macOS dock at runtime). */
 const ICON_PNG = path.join(__dirname, "..", "icons", "icon.png");
 
-/**
- * Development builds always expose debugging. Packaged macOS builds require
- * `defaults write ai.omnigent.desktop DeveloperMode -bool true` before launch.
- */
+const isDevBuild = !app.isPackaged || omnigentBuild === "dev";
+const getUserDefault =
+  !app.isPackaged && process.platform === "darwin"
+    ? getDevUserDefault
+    : systemPreferences.getUserDefault?.bind(systemPreferences);
+
+/** Packaged builds require an explicit user default to enable debugging. */
 function developerModeEnabled() {
   return isDeveloperModeEnabled({
     isPackaged: app.isPackaged,
     platform: process.platform,
-    getUserDefault:
-      typeof systemPreferences.getUserDefault === "function"
-        ? systemPreferences.getUserDefault.bind(systemPreferences)
-        : undefined,
+    getUserDefault,
   });
 }
 
 /** Read the current macOS MDM-provided server list without persisting it. */
 function managedServerUrls() {
-  return getManagedServerUrls({
-    platform: process.platform,
-    getUserDefault:
-      typeof systemPreferences.getUserDefault === "function"
-        ? systemPreferences.getUserDefault.bind(systemPreferences)
-        : undefined,
-  });
+  return getManagedServerUrls({ platform: process.platform, getUserDefault });
 }
 
 /** Display names for the MDM-provided servers, keyed by server URL. */
 function managedServerNames() {
-  return getManagedServerNames({
-    platform: process.platform,
-    getUserDefault:
-      typeof systemPreferences.getUserDefault === "function"
-        ? systemPreferences.getUserDefault.bind(systemPreferences)
-        : undefined,
-  });
+  return getManagedServerNames({ platform: process.platform, getUserDefault });
 }
 
 /**
@@ -290,13 +280,7 @@ function managedServerNames() {
  * macOS on every call (never persisted), so profile changes apply live.
  */
 function databricksInternalFeaturesEnabled() {
-  return getDatabricksInternalFeaturesEnabled({
-    platform: process.platform,
-    getUserDefault:
-      typeof systemPreferences.getUserDefault === "function"
-        ? systemPreferences.getUserDefault.bind(systemPreferences)
-        : undefined,
-  });
+  return getDatabricksInternalFeaturesEnabled({ platform: process.platform, getUserDefault });
 }
 
 /**
@@ -1179,6 +1163,7 @@ const updater = createDesktopUpdater({
   // this to !app.isPackaged — not an env var — ensures a packaged app can
   // never be redirected to a repository-local update configuration.
   forceDevUpdateConfig: !app.isPackaged,
+  updatesEnabled: !app.isPackaged || !isDevBuild,
 });
 
 // Shell-owned About window: available from the native application menu even
@@ -4255,7 +4240,12 @@ async function handleDeepLink(raw) {
 // ---------------------------------------------------------------------------
 
 // Name drives the macOS app menu title and the notification source name.
-app.setName("Omnigent");
+app.setName(isDevBuild ? "Omnigent Dev" : "Omnigent");
+if (isDevBuild) {
+  const devData = path.join(app.getPath("appData"), "Omnigent Dev");
+  fs.mkdirSync(devData, { recursive: true });
+  app.setPath("userData", devData);
+}
 
 // Single-instance: focus the existing window instead of opening a second.
 const gotLock = app.requestSingleInstanceLock();
@@ -4309,7 +4299,8 @@ if (!gotLock) {
 
   app.whenReady().then(() => {
     // App User Model ID so Windows attributes notifications/taskbar correctly.
-    if (process.platform === "win32") app.setAppUserModelId("ai.omnigent.desktop");
+    if (process.platform === "win32")
+      app.setAppUserModelId(isDevBuild ? DEV_DOMAIN : "ai.omnigent.desktop");
     applyDockIcon();
     registerPermissions();
     registerLocalhostAccess();
