@@ -174,6 +174,7 @@ async def test_publish_session_created_logs_parent_link_for_native_subagent() ->
     ]
     assert len(created) == 1
     assert created[0]["attributes"]["parent_session_id"] == "conv_parent"
+    assert created[0]["attributes"]["creation_kind"] == "child"
 
 
 @pytest.mark.asyncio
