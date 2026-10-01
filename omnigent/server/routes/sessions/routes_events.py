@@ -234,6 +234,7 @@ from omnigent.server.routes._sessions.orchestration import (
     _persist_host_launch_failure_turn,
     _persist_native_terminal_failure,
     _resolve_elicitation,
+    _runner_live_on_another_replica_from_conversations,
     _wait_for_host_bound_runner_client,
     ensure_runner_connected,
 )
@@ -246,6 +247,7 @@ from omnigent.server.schemas import (
     McpServerStartup,
     SessionEventInput,
 )
+from omnigent.server.session_live_state import last_liveness_stamp
 from omnigent.server.subagent_activity import (
     native_subagent_terminal_status,
     record_subagent_activity,
@@ -415,6 +417,63 @@ async def _raise_if_runner_on_another_replica(
     if host is not None and host_is_live(host):
         raise OmnigentError(
             "session runner is on another replica; retry",
+            code=ErrorCode.WRONG_REPLICA,
+        )
+
+
+async def _raise_if_runner_re_tunnelled_to_another_replica(
+    session_id: str,
+    runner_id: str | None,
+    conversation_store: ConversationStore,
+) -> None:
+    """
+    Re-address a rollout miss where the runner re-tunnelled to a sibling replica.
+
+    A server rollout closes the old pod's host and runner tunnels; both
+    reconnect to a new pod within seconds, and the replica they land on stamps
+    ``runner_last_seen`` in the shared store. A message that races onto a
+    *different* new pod finds no local tunnel and, past the connect grace,
+    would record a ``runner_failed_to_start`` turn even though the runner is
+    healthy on the sibling pod. A fresh re-read of the bound runner's stamp
+    distinguishes that case: a stamp still within the liveness TTL that this
+    process never wrote is a sibling replica's live tunnel, so raise
+    ``WRONG_REPLICA`` to make the client re-address instead of failing the turn.
+
+    The host-level :func:`_raise_if_runner_on_another_replica` can miss this
+    window because the host's own liveness has not re-settled when the message
+    lands; the runner stamp settles first.
+
+    The re-read confirms the row is still bound to *runner_id* before trusting
+    its stamp: a concurrent relaunch can rebind the row to a new runner without
+    clearing the old stamp, and that retained stamp must not be read as the old
+    runner being live elsewhere (mirrors the ``runner_id`` guard in
+    :func:`_runner_live_on_another_replica_from_conversations`).
+
+    Bounded worst case: if the replica that held the tunnel died ungracefully
+    (no ``clear_runner_liveness``) and the runner did not reconnect anywhere,
+    the stale stamp stays fresh for up to ``RUNNER_LIVENESS_TTL_S``; callers
+    retry on ``WRONG_REPLICA`` for that window before the real failure surfaces.
+
+    :param session_id: Session/conversation identifier.
+    :param runner_id: Runner id being classified (captured before the wait).
+    :param conversation_store: Store used to re-read the fresh runner stamp.
+    :raises OmnigentError: ``WRONG_REPLICA`` when the bound runner's liveness
+        stamp is fresh evidence written by another replica.
+    """
+    if runner_id is None:
+        return
+    fresh = await asyncio.to_thread(conversation_store.get_conversation, session_id)
+    if fresh is None:
+        return
+    # Reuse the shared freshness+binding classifier: it only counts the row when
+    # it is still bound to ``runner_id`` (a concurrent relaunch rebinds without
+    # clearing the stamp) and the stamp is fresh and newer than this replica's
+    # own last write — i.e. written by a live sibling.
+    if _runner_live_on_another_replica_from_conversations(
+        [fresh], runner_id, last_liveness_stamp(runner_id)
+    ):
+        raise OmnigentError(
+            "session runner re-tunnelled to another replica; retry",
             code=ErrorCode.WRONG_REPLICA,
         )
 
@@ -2317,6 +2376,14 @@ def register_events_routes(
             else:
                 _runner_needs_session_init = True
         if runner_client is None:
+            # A rollout can leave the runner live on a sibling pod; re-address
+            # (WRONG_REPLICA) instead of failing the turn — see the guard's
+            # docstring. Skipped on a definitive host refusal (authoritative
+            # local answer, surfaced below).
+            if not relaunched_launch_refused:
+                await _raise_if_runner_re_tunnelled_to_another_replica(
+                    session_id, conv.runner_id, conversation_store
+                )
             # A native terminal-session message must NOT be silently
             # dropped when no runner is reachable — the runner crashed
             # before connecting (the daemon couldn't bring it up). Persist
