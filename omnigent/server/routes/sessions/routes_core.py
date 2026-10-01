@@ -951,8 +951,9 @@ def register_core_routes(
         _reject_server_reserved_label_seed(parsed_metadata.labels)
 
         inherited_runner_id: str | None = None
+        parent_conv = None
         if parsed_metadata.parent_session_id is not None:
-            inherited_runner_id = await _authorize_bundled_parent_and_inherit_runner(
+            parent_conv, inherited_runner_id = await _authorize_bundled_parent_and_inherit_runner(
                 parsed_metadata.parent_session_id,
                 user_id=user_id,
                 permission_store=permission_store,
@@ -999,6 +1000,21 @@ def register_core_routes(
             spec,
             user_id,
             conversation_store,
+        )
+        from omnigent.models.model_catalog import spec_harness
+        from omnigent.server.routes._session_harness_readiness import (
+            validate_create_harness_readiness,
+        )
+
+        await validate_create_harness_readiness(
+            harness=spec_harness(spec),
+            host_id=parsed_metadata.host_id,
+            parent_session_id=parsed_metadata.parent_session_id,
+            inherited_runner_id=inherited_runner_id,
+            user_id=user_id,
+            conversation_store=conversation_store,
+            host_store=getattr(request.app.state, "host_store", None),
+            parent=parent_conv,
         )
         with creation_stage("create_persistence_ms"):
             result = await asyncio.to_thread(
