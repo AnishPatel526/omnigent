@@ -7796,6 +7796,8 @@ async def _relay_runner_stream_once(
                             # call (the segment persists here, ahead of the
                             # terminal-flush evaluation).
                             evaluate_response_phase=_boundary_deny is None,
+                            # Progress text precedes more tool calls.
+                            turn_final=False,
                         )
                         # A failed append leaves text_acc for retry — re-arm
                         # the marker so the retry persists the sentinel.
@@ -7852,10 +7854,10 @@ async def _relay_runner_stream_once(
                             current_response_id,
                             _final_model,
                             deny_reason=_deny_reason,
-                            # Terminal flush is the only place the runner
-                            # topology can evaluate the spec's RESPONSE-phase
-                            # output policies over the final assistant text.
+                            # Gate any remaining text before persistence.
                             evaluate_response_phase=_deny_reason is None,
+                            # Only successful completion triggers final-response actions.
+                            turn_final=evt_type == "response.completed",
                         )
                         # A failed append leaves text_acc intact for a retry
                         # at a later flush — re-arm the marker so the retry

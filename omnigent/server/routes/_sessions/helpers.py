@@ -8053,17 +8053,17 @@ async def _relay_response_policy_deny_reason(
     conversation_store: ConversationStore,
     session_id: str,
     text: str,
+    *,
+    turn_final: bool,
 ) -> str | None:
     """
     Evaluate *text* against the session's OUTPUT (RESPONSE) phase policies.
 
     Runner-relayed (scaffold) harnesses never POST the assistant message
     back through ``POST /v1/sessions/{id}/events``, so the
-    ``Phase.RESPONSE`` evaluator there is unreachable for them. The relay's
-    terminal text flush is their single persist point, so this evaluates the
-    same output policies over the final assistant text right before it
-    becomes durable — making a spec's ``response``-phase policy enforceable
-    in the runner topology.
+    ``Phase.RESPONSE`` evaluator there is unreachable for them. The relay
+    evaluates these policies at each nonempty text flush, including
+    tool-call boundaries, before the segment becomes durable.
 
     Fails OPEN (returns ``None``) on any evaluation error, matching the LLM
     phases' advisory default: a policy-engine hiccup must not destroy the
@@ -8072,6 +8072,9 @@ async def _relay_response_policy_deny_reason(
     :param conversation_store: Store for the conversation/labels lookup.
     :param session_id: Session/conversation identifier.
     :param text: The joined assistant text segment about to persist.
+    :param turn_final: Whether ``text`` ends a successfully completed turn.
+        Forwarded as ``event["context"]["turn_final"]`` so completion
+        policies can skip intermediate and unsuccessful-turn segments.
     :returns: The deny reason when an output policy DENYs, else ``None``.
     """
     from omnigent.runtime._globals import _agent_store
@@ -8110,6 +8113,7 @@ async def _relay_response_policy_deny_reason(
             _agent_store,
             None,
             actor=_build_actor(turn_actor),
+            turn_final=turn_final,
         )
     except Exception:  # noqa: BLE001 — fail open: output phases are advisory on error
         _logger.exception(
@@ -8133,6 +8137,7 @@ async def _flush_relay_text(
     *,
     deny_reason: str | None = None,
     evaluate_response_phase: bool = False,
+    turn_final: bool = False,
 ) -> None:
     """
     Persist buffered assistant text as a message item and clear the buffer.
@@ -8190,9 +8195,13 @@ async def _flush_relay_text(
     :param model_id: Assistant agent label for the message.
     :param deny_reason: When set, an output policy already denied this
         turn's assistant text; persist the deny sentinel instead of it.
-    :param evaluate_response_phase: When ``True`` (terminal flush), gate
+    :param evaluate_response_phase: When ``True``, gate
         the text through the spec's RESPONSE-phase policies before
         persisting.
+    :param turn_final: Whether this segment ends a successfully completed
+        turn. Completion policies can use it to skip intermediate and
+        unsuccessful-turn segments. Content policies should check every
+        segment. Empty segments never invoke policies.
     """
     if not text_acc:
         return
@@ -8208,7 +8217,7 @@ async def _flush_relay_text(
         return
     if deny_reason is None and evaluate_response_phase:
         deny_reason = await _relay_response_policy_deny_reason(
-            conversation_store, session_id, text
+            conversation_store, session_id, text, turn_final=turn_final
         )
     if deny_reason is not None:
         # Substitute the sentinel for the denied content — same Option-B
@@ -9022,6 +9031,7 @@ async def _evaluate_output_policy(
     _runner_router: RunnerRouter | None,
     *,
     actor: dict[str, str] | None = None,
+    turn_final: bool | None = None,
 ) -> dict[str, Any] | None:
     """
     Evaluate an assistant message against OUTPUT phase policies.
@@ -9043,6 +9053,9 @@ async def _evaluate_output_policy(
     :param actor: Authenticated principal, e.g.
         ``{"run_as": "alice@example.com"}``. ``None`` when
         identity is unknown.
+    :param turn_final: Whether this segment ends a successfully completed
+        turn. The relay passes ``False`` for intermediate or unsuccessful
+        segments. ``None`` when the calling path doesn't distinguish.
     :returns: ``None`` on ALLOW (fall through). Verdict dict
         with ``_denied_body`` on DENY.
     """
@@ -9068,6 +9081,7 @@ async def _evaluate_output_policy(
         content=assistant_text,
         tool_name=None,
         actor=actor,
+        turn_final=turn_final,
     )
     result = await engine.evaluate(ctx)
 
