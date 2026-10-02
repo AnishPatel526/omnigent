@@ -21,6 +21,7 @@ import {
   Kbd,
   MOD_KEY,
   SHIFT_KEY,
+  VIEW_MODE_TOGGLE_KEYS,
 } from "@/components/KeyboardShortcut";
 import {
   Dialog,
@@ -100,6 +101,7 @@ const SHORTCUT_GROUPS: ShortcutGroup[] = [
   {
     title: "View",
     items: [
+      { label: "Toggle Chat / Terminal view", keys: [...VIEW_MODE_TOGGLE_KEYS] },
       { label: "Toggle conversations sidebar", keys: [MOD_KEY, ALT_KEY, "["] },
       { label: "Focus or close workspace sidebar", keys: [MOD_KEY, ALT_KEY, "]"] },
       {

@@ -28,7 +28,7 @@ import {
   useState,
 } from "react";
 import { cn } from "@/lib/utils";
-import { ALT_KEY, CompactKbd, CompactShortcutKeys, MOD_KEY } from "@/components/KeyboardShortcut";
+import { ALT_KEY, CompactShortcutKeys, MOD_KEY } from "@/components/KeyboardShortcut";
 import { defaultWorkspaceTabs, readDefaultWorkspaceTab } from "@/lib/workspaceTabPreferences";
 import { isEditorLevel, isOwnerLevel } from "@/lib/permissionsApi";
 import {
@@ -107,19 +107,11 @@ function WorkspaceTabTooltip({
       <TooltipTrigger asChild>
         <span className={cn("inline-flex shrink-0", className)}>{children}</span>
       </TooltipTrigger>
-      <TooltipContent side="bottom" className="flex items-center gap-1.5">
+      <TooltipContent
+        side="bottom"
+        shortcut={shortcut ? [WORKSPACE_OPEN_KEYS, [shortcut]] : undefined}
+      >
         <span>{label}</span>
-        {shortcut && (
-          <span className="flex items-center gap-1 whitespace-nowrap">
-            {WORKSPACE_OPEN_KEYS.map((key) => (
-              <CompactKbd key={key}>{key}</CompactKbd>
-            ))}
-            <span aria-hidden="true" className="text-muted-foreground/70">
-              +
-            </span>
-            <CompactKbd>{shortcut}</CompactKbd>
-          </span>
-        )}
       </TooltipContent>
     </Tooltip>
   );

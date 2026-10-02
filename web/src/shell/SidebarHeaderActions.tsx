@@ -1,6 +1,6 @@
 import { PanelLeftOpenIcon, PanelRightOpenIcon, SearchIcon, SettingsIcon } from "lucide-react";
 
-import { ALT_KEY, CompactShortcutKeys, MOD_KEY } from "@/components/KeyboardShortcut";
+import { ALT_KEY, ARIA_MOD_KEY, MOD_KEY } from "@/components/KeyboardShortcut";
 import { Button } from "@/components/ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { Link } from "@/lib/routing";
@@ -9,7 +9,6 @@ import { cn } from "@/lib/utils";
 const SIDEBAR_TOGGLE_KEYS = [MOD_KEY, ALT_KEY, "["] as const;
 const SEARCH_KEYS = [MOD_KEY, "K"] as const;
 const SETTINGS_KEYS = [MOD_KEY, ALT_KEY, ","] as const;
-const ARIA_MOD_KEY = MOD_KEY === "⌘" ? "Meta" : "Control";
 
 /**
  * Search / Settings / sidebar-toggle cluster from the sidebar's header row.
@@ -92,9 +91,8 @@ export function SidebarHeaderActions({
             )}
           </Button>
         </TooltipTrigger>
-        <TooltipContent side="bottom" className="flex items-center gap-1.5">
+        <TooltipContent side="bottom" shortcut={SIDEBAR_TOGGLE_KEYS}>
           <span>{expanded ? "Collapse sidebar" : "Open sidebar"}</span>
-          <CompactShortcutKeys keys={SIDEBAR_TOGGLE_KEYS} />
         </TooltipContent>
       </Tooltip>
     </div>
@@ -150,9 +148,8 @@ export function SidebarSearchButton({
       </TooltipTrigger>
       {/* Bottom placement keeps the tooltip clear of the macOS Electron
       shell's traffic lights at the window's top edge. */}
-      <TooltipContent side="bottom" className="flex items-center gap-1.5">
+      <TooltipContent side="bottom" shortcut={SEARCH_KEYS}>
         <span>Search</span>
-        <CompactShortcutKeys keys={SEARCH_KEYS} />
       </TooltipContent>
     </Tooltip>
   );
@@ -192,9 +189,8 @@ export function SidebarSettingsButton({
           </Link>
         </Button>
       </TooltipTrigger>
-      <TooltipContent side="bottom" className="flex items-center gap-1.5">
+      <TooltipContent side="bottom" shortcut={SETTINGS_KEYS}>
         <span>Settings</span>
-        <CompactShortcutKeys keys={SETTINGS_KEYS} />
       </TooltipContent>
     </Tooltip>
   );

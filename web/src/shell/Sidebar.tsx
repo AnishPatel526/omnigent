@@ -227,6 +227,7 @@ import { ForkSessionDialog } from "./ForkSessionDialog";
 import { SIDEBAR_ROW } from "./sidebarStyles";
 import { TooltipArrow } from "radix-ui/tooltip";
 import { getEmbedRoot } from "../lib/host";
+import { ALT_KEY, ARIA_MOD_KEY, CompactShortcutKeys, MOD_KEY } from "@/components/KeyboardShortcut";
 
 // Positioning for a row's trailing session-state badge. Anchored at the row's
 // trailing icon edge in every viewport: on desktop it fades on hover so the pin
@@ -262,6 +263,7 @@ const SIDEBAR_ACTIVE_HIGHLIGHT =
 const DROP_TARGET_HIGHLIGHT = SIDEBAR_ACTIVE_HIGHLIGHT;
 
 const SCROLLBAR_HIDE_DELAY_MS = 700;
+const NEW_SESSION_KEYS = [MOD_KEY, ALT_KEY, "N"] as const;
 
 // Maps a first-class project id → its name, provided once at the list level so
 // each row resolves its ``project_id`` to a folder name without its own
@@ -1057,7 +1059,7 @@ function SidebarImpl({
                   // transparent 1px border so the icon lands exactly on that
                   // column, flush with the Inbox row and folder rows.
                   SIDEBAR_ROW,
-                  "w-full justify-start border-0 font-normal",
+                  "group/new-session w-full justify-start border-0 font-normal",
                   SIDEBAR_HOVER_HIGHLIGHT,
                   isNewChatPage && SIDEBAR_ACTIVE_HIGHLIGHT,
                 )}
@@ -1070,6 +1072,7 @@ function SidebarImpl({
                 <Link
                   to="/"
                   componentId="sidebar.new_chat"
+                  aria-keyshortcuts={`${ARIA_MOD_KEY}+Alt+N`}
                   onClick={(e) => {
                     switchTab("mine");
                     onNavClick(e);
@@ -1084,6 +1087,10 @@ function SidebarImpl({
                     )}
                   />
                   New session
+                  <CompactShortcutKeys
+                    keys={NEW_SESSION_KEYS}
+                    className="pointer-events-none absolute top-1/2 right-2 -translate-y-1/2 opacity-0 transition-opacity group-focus-visible/new-session:opacity-100 [@media((hover:hover)_and_(pointer:fine))]:group-hover/new-session:opacity-100"
+                  />
                 </Link>
               </Button>
               {/* Keep Scheduled in the primary nav group with the same row treatment as New session. */}
