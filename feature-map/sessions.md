@@ -29,6 +29,8 @@ the header menu), and each place is a separate entry point.
   dialog with the command to run; the desktop app can reconnect a local host
   itself. States: reconnecting (spinner), reconnect failed (retry), host offline.
 - `resume-imported`: an imported session can be resumed onto a chosen local host.
+- `recent-switcher`: the desktop app opens the five most recent sessions with
+  Control+Tab; Tab and Shift+Tab cycle, releasing Control switches, and Escape cancels.
 - `browser-storage`: browser soft tabs, including one opened by the agent, share
   cookies within a session; different sessions stay isolated. Navigation stays
   per-tab.
@@ -60,9 +62,13 @@ when a local session is stranded). In the desktop app, reconnect acts directly.
 **Mobile:** the header menu and the sidebar drawer offer the same actions; touch
 devices fold some row controls into the menu.
 
-**Desktop browser:** choose **+ → Browser** in the Workspace panel. Agent
-browser requests and chat links with in-app opening enabled create or select a
-closable Browser soft tab automatically.
+**Desktop browser:** choose **+ → Browser** in the Workspace panel or press
+⌘/Ctrl+Alt+B. Agent browser requests and chat links with in-app opening enabled
+create or select a closable Browser soft tab automatically.
+
+**Desktop recent sessions:** hold Control and press Tab to open the five most
+recent sessions. Continue pressing Tab (or Shift+Tab) to cycle, release Control
+to switch, or press Escape to cancel.
 
 ## Driving it with the repro environment
 
@@ -136,6 +142,9 @@ plain `uv run pytest`, which starts a private server for the test.
   `tests/e2e_ui/sessions/test_reconnect_local_host_from_app.py::test_desktop_reconnect_failure_offers_retry`
 - **`resume-imported` (own environment):**
   `tests/e2e_ui/sessions/test_imported_session_resume.py::test_imported_session_resumes_onto_chosen_local_host`
+- **`recent-switcher` (manual Electron):** open at least six sessions, hold
+  Control and press Tab to show the five most recent, cycle with Tab and
+  Shift+Tab, release Control to switch, then reopen and press Escape to cancel.
 - **`browser-storage` (real Electron, own environment):**
   `web/electron/e2e/desktop_cookie_isolation.e2e.js`. Sign into a site in one
   tab, open it in another tab and the agent browser, and confirm both are signed
