@@ -1655,6 +1655,9 @@ def prepare_bridge_dir(
     """
     Create or refresh the bridge directory for a native Claude session.
 
+    Per-launch lifecycle files remain available to delayed exit observers until
+    session deletion or the dead-owner sweep removes the bridge directory.
+
     :param conversation_id: Omnigent conversation id, e.g.
         ``"conv_abc123"``.
     :param bridge_id: Opaque bridge id, e.g. ``"bridge_abc123"``.
@@ -2254,6 +2257,7 @@ def build_hook_settings(
     }
     hooks: dict[str, list[_JsonObject]] = {
         "SessionStart": [{"hooks": [session_start_hook]}],
+        "SessionEnd": [{"hooks": [hook]}],
         "Stop": [{"hooks": [hook]}],
         "StopFailure": [{"hooks": [hook]}],
         # ``UserPromptSubmit`` is the symmetric counterpart to
