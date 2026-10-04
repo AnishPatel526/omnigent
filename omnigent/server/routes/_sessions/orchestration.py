@@ -68,6 +68,7 @@ from omnigent.host.frames import (
 )
 from omnigent.llms.context_window import resolve_effective_context_window
 from omnigent.models.model_metadata import concrete_reported_model
+from omnigent.native.failure_telemetry import FailureContext, normalize_failure_context
 from omnigent.native.native_coding_agents import (
     native_coding_agent_for_agent_name,
     native_coding_agent_for_harness,
@@ -3181,13 +3182,21 @@ async def _enrich_terminal_status_with_subagent_output(
     """
     if status not in ("idle", "failed"):
         return data
+    context: FailureContext = {}
+    if status == "failed":
+        context = normalize_failure_context(data.get("failure_context"))
+        context.setdefault("failure_source", "external_status")
+        data = {**data, "failure_context": context}
     current_turn_only = status == "failed" or data.get("turn_outcome") == "cancelled"
     existing = data.get("output")
     if current_turn_only and isinstance(existing, str) and existing.strip():
+        if status == "failed":
+            context.setdefault("detail_source", "external_status_output")
         return data
     # The store's latest assistant text can be prose that preceded the error.
     failure_detail = data.get("failure_detail") if status == "failed" else None
     if isinstance(failure_detail, str) and failure_detail.strip():
+        context.setdefault("detail_source", "external_status_failure_detail")
         return {**data, "output": failure_detail.strip()}
     raw_response_id = data.get("response_id") if current_turn_only else None
     response_id = raw_response_id if isinstance(raw_response_id, str) and raw_response_id else None
@@ -3199,7 +3208,11 @@ async def _enrich_terminal_status_with_subagent_output(
         stop_at_user_message=current_turn_only,
     )
     if output is None:
+        if status == "failed":
+            context["detail_source"] = "missing"
         return data
+    if status == "failed":
+        context["detail_source"] = "assistant_output_fallback"
     return {**data, "output": output}
 
 
