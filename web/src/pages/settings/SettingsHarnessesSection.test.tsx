@@ -13,6 +13,7 @@ import { ApiError } from "@/lib/sessionsApi";
 import type { HarnessStartup, Host } from "@/hooks/useHosts";
 import { SettingsHarnessesSection } from "./SettingsHarnessesSection";
 
+let pluginMetadataRequested = false;
 const STARTUP: HarnessStartup = {
   command: "claude",
   resolved_path: "/opt/bin/claude",
@@ -62,7 +63,10 @@ const INVENTORY: HarnessInventory = {
 let inventory: HarnessInventory = INVENTORY;
 vi.mock("@/hooks/useHarnessInventory", async (importActual) => ({
   ...(await importActual()),
-  useHarnessInventory: () => inventory,
+  useHarnessInventory: (_host: Host, options: { includePluginMetadata: boolean }) => {
+    pluginMetadataRequested = options.includePluginMetadata;
+    return inventory;
+  },
 }));
 
 // The "Set up" button is gated on the harness_install feature (like New Chat),
@@ -359,3 +363,49 @@ describe("Launch settings compatibility", () => {
     expect(startupCalls).toHaveBeenLastCalledWith("h2", "claude-native");
   });
 });
+
+it("shows installed plugin metadata and disabled bundled servers", () => {
+  hosts = [ONLINE];
+  inventory = {
+    ...INVENTORY,
+    context: {
+      ...INVENTORY.context,
+      plugins: [
+        {
+          id: "claude:hooks@market",
+          harness: "claude",
+          name: "hooks",
+          skills: [],
+          description: "Hook helpers",
+          marketplace: "market",
+          version: "1.2.3",
+          enabled: false,
+          mcp_servers: ["bundled"],
+          has_hooks: true,
+          has_commands: true,
+        },
+      ],
+    },
+  };
+  renderHarnesses("claude-native");
+  selectTab("Plugins · 1");
+  expect(screen.getByTestId("catalog-row-hooks").textContent).toContain("Disabled");
+  fireEvent.click(screen.getByTestId("catalog-row-hooks"));
+  expect(screen.getByText("Hook helpers")).toBeTruthy();
+  expect(screen.getByText(/v1\.2\.3 · market · Disabled/)).toBeTruthy();
+  selectTab("MCPs · 1");
+  expect(screen.getByTestId("catalog-row-bundled")).toBeTruthy();
+  fireEvent.click(screen.getByRole("button", { name: "Plugins" }));
+  expect(screen.getByRole("tab", { name: "Plugins · 1" }).getAttribute("aria-selected")).toBe(
+    "true",
+  );
+});
+
+it.each(["codex-native", "cursor-native"])(
+  "does not request Claude plugin metadata on %s",
+  (harness) => {
+    hosts = [{ ...ONLINE, configured_harnesses: { [harness]: true } }];
+    renderHarnesses(harness);
+    expect(pluginMetadataRequested).toBe(false);
+  },
+);
