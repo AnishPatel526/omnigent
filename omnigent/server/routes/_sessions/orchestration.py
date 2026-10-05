@@ -3549,13 +3549,14 @@ async def _mark_runner_sessions_offline_impl(
         # consumes the marker — so peek without discarding here.
         if conv.id in _intentional_stop_sessions:
             continue
-        # Cache first (this replica holds the runner's tunnel, so it saw the
-        # turn edges), falling back to the row for a session whose live state
-        # was published before a restart.
-        live = _session_status_cache.get(conv.id, conv.live_status)
-        interrupted = live in _MID_TURN_STATUSES
-        dead_on_arrival = fail_idle_top_level and conv.kind != "sub_agent"
-        if not interrupted and not dead_on_arrival:
+        if not await _runner_disconnect_requires_failure(
+            conv.id,
+            conversation_store,
+            origin="runner_offline_sweep",
+            snapshot=conv,
+            fail_idle_top_level=fail_idle_top_level,
+            error_code=error.code,
+        ):
             continue
         turn_id = _session_active_response_cache.get(conv.id)
         _publish_status(conv.id, "failed", error, failure_origin="runner_offline_sweep")
@@ -7236,47 +7237,90 @@ def _runner_live_on_another_replica_from_conversations(
     )
 
 
-async def _runner_drop_interrupted_turn(
+async def _runner_disconnect_requires_failure(
     session_id: str,
     conversation_store: ConversationStore,
+    *,
+    origin: str,
+    snapshot: Conversation | None = None,
+    fail_idle_top_level: bool = False,
+    error_code: str = "runner_disconnected",
 ) -> bool:
-    """
-    Report whether a departing runner caught this session mid-turn.
+    """Decide whether runner loss interrupted work, recording the state used.
 
-    Prefers the relay-fed cache — the replica holding the runner's tunnel
-    saw the turn edges — and falls back to the row for a session whose live
-    state was published before a restart, so a deploy mid-turn does not
-    downgrade a real interruption to a benign one.
+    Local turn edges are newer than asynchronous persistence. A cold cache
+    needs a fresh row: an offline sweep's snapshot may predate a child's idle
+    observation. Recheck the cache after the read, even when the read fails.
 
-    An unreadable or missing row leaves the question open, and this runs
-    inside the disconnect handler: answering "not mid-turn" there would
-    both swallow the failure and let the error escape the handler, killing
-    the relay without publishing anything — the silent truncation the
-    failed status exists to prevent. So an indeterminate answer reports the
-    drop, as the ungated relay always did.
-
-    :param session_id: Session/conversation identifier,
-        e.g. ``"conv_abc123"``.
-    :param conversation_store: Store used to read the durable live status.
-    :returns: ``True`` when a turn was in flight
-        (:data:`_MID_TURN_STATUSES`) or the state is indeterminate.
+    If the read is unavailable, a sweep retains its snapshot fallback; the
+    relay reports an indeterminate drop so a real interruption is not lost.
+    Only top-level sessions can fail before startup with ``fail_idle_top_level``.
     """
     cached = _session_status_cache.get(session_id)
+    persisted: Conversation | None = None
+    lookup = "not_needed"
+    if cached is None:
+        try:
+            persisted = await asyncio.to_thread(conversation_store.get_conversation, session_id)
+            lookup = "found" if persisted is not None else "missing"
+        except Exception:  # noqa: BLE001 — a failed read must not swallow a disconnect
+            lookup = "error"
+            _logger.warning(
+                "Runner disconnect: live-status read failed for session=%s",
+                session_id,
+                exc_info=True,
+                extra={"session_id": session_id},
+            )
+        cached = _session_status_cache.get(session_id)
+
     if cached is not None:
-        return cached in _MID_TURN_STATUSES
-    try:
-        conv = await asyncio.to_thread(conversation_store.get_conversation, session_id)
-    except Exception:  # noqa: BLE001 — an unreadable row must not kill the relay
-        _logger.warning(
-            "Relay: live-status read failed for session=%s; reporting the drop",
-            session_id,
-            exc_info=True,
-            extra={"session_id": session_id},
-        )
-        return True
-    if conv is None:
-        return True
-    return conv.live_status in _MID_TURN_STATUSES
+        live, source = cached, "cache"
+    elif persisted is not None:
+        live, source = persisted.live_status, "persisted"
+    elif snapshot is not None:
+        live, source = snapshot.live_status, "snapshot"
+    else:
+        live, source = None, "unknown"
+
+    conv = persisted if persisted is not None else snapshot
+    if snapshot is not None and session_id in _intentional_stop_sessions:
+        # A Stop can arrive while the sweep refreshes its row.
+        decision = "intentional_stop"
+    elif live in _MID_TURN_STATUSES or source == "unknown":
+        decision = "failed_mid_turn"
+    elif fail_idle_top_level and conv is not None and conv.kind != "sub_agent":
+        decision = "failed_before_start"
+    else:
+        decision = "idle_no_failure"
+
+    handle = _runner_relay_tasks.get(session_id)
+    _logger.warning(
+        "Runner disconnect for session=%s: %s (status=%s source=%s)",
+        session_id,
+        decision,
+        live,
+        source,
+        extra=debug_event(
+            "runner_disconnect_decision",
+            session_id=session_id,
+            turn_id=_session_active_response_cache.get(session_id),
+            origin=origin,
+            decision=decision,
+            error_code=error_code,
+            status_source=source,
+            cached_session_status=cached,
+            persisted_session_status=persisted.live_status if persisted is not None else None,
+            snapshot_session_status=snapshot.live_status if snapshot is not None else None,
+            status_lookup=lookup,
+            session_kind=conv.kind if conv is not None else None,
+            parent_session_id=conv.parent_conversation_id if conv is not None else None,
+            runner_id=handle.runner_id if handle is not None else conv.runner_id if conv else None,
+            host_id=conv.host_id if conv is not None else None,
+            conversation_updated_at=conv.updated_at if conv is not None else None,
+            fail_idle_top_level=fail_idle_top_level,
+        ),
+    )
+    return decision in ("failed_mid_turn", "failed_before_start")
 
 
 async def _relay_runner_live_elsewhere(
@@ -7338,7 +7382,7 @@ async def _relay_runner_stream(
     one shutting down (:func:`omnigent.server.shutdown_state.server_shutting_down`):
     it closed the tunnel itself, so the loss says nothing about the runner
     and no session is failed. Otherwise only a session it caught mid-turn
-    (:func:`_runner_drop_interrupted_turn`) gets the
+    (:func:`_runner_disconnect_requires_failure`) gets the
     ``failed`` status and durable ``runner_disconnected`` labels — the same
     rule :func:`_mark_runner_sessions_offline_impl` applies to the runner's
     other sessions. An idle session had no work to interrupt, so it stays
@@ -7413,7 +7457,9 @@ async def _relay_runner_stream(
                 decision = "server_shutdown"
             elif await _relay_runner_live_elsewhere(session_id, conversation_store):
                 decision = "live_elsewhere"
-            elif await _runner_drop_interrupted_turn(session_id, conversation_store):
+            elif await _runner_disconnect_requires_failure(
+                session_id, conversation_store, origin="runner_disconnected_mid_turn"
+            ):
                 decision = "failed_mid_turn"
             else:
                 decision = "idle_no_failure"
