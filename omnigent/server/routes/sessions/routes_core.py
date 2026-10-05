@@ -306,7 +306,9 @@ async def _wake_runner_for_model_change(
         )
         if outcome.error is not None:
             raise OmnigentError(outcome.error.message, code=ErrorCode.RUNNER_UNAVAILABLE)
-    await _ensure_runner_relay_ready(conv.id, conv.runner_id, runner_client, conversation_store)
+    await _ensure_runner_relay_ready(
+        conv.id, conv.runner_id, runner_client, conversation_store, conversation=conv
+    )
     return conv
 
 
@@ -2607,6 +2609,7 @@ def register_core_routes(
                     runner_id,
                     _runner_client,
                     conversation_store,
+                    conversation=conv,
                 )
                 if parent_initialized:
                     assert conv is not None and _runner_client is not None

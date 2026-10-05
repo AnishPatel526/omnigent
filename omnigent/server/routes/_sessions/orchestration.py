@@ -204,6 +204,7 @@ from omnigent.server.routes._sessions.common import (  # noqa: F401
     _pushed_model_options_cache,
     _recent_mirrored_tool_calls,
     _RelayHandle,
+    _RelayStatusSnapshot,
     _runner_relay_tasks,
     _runner_status_probe_backoff,
     _runner_status_probe_inflight,
@@ -4918,7 +4919,7 @@ async def _ensure_runner_session_initialized(
             schedule_child_restoration(conv, runner_client, conversation_store, initializer)
         else:
             await _ensure_runner_relay_ready(
-                session_id, conv.runner_id, runner_client, conversation_store
+                session_id, conv.runner_id, runner_client, conversation_store, conversation=conv
             )
             await restore_active_children(conv, runner_client, conversation_store, initializer)
     try:
@@ -7252,8 +7253,8 @@ async def _runner_disconnect_requires_failure(
     needs a fresh row: an offline sweep's snapshot may predate a child's idle
     observation. Recheck the cache after the read, even when the read fails.
 
-    If the read is unavailable, a sweep retains its snapshot fallback; the
-    relay reports an indeterminate drop so a real interruption is not lost.
+    If the read is unavailable, use the sweep or relay's adoption snapshot.
+    Without any known state, report the drop so an interruption is not lost.
     Only top-level sessions can fail before startup with ``fail_idle_top_level``.
     """
     cached = _session_status_cache.get(session_id)
@@ -7273,16 +7274,21 @@ async def _runner_disconnect_requires_failure(
             )
         cached = _session_status_cache.get(session_id)
 
+    handle = _runner_relay_tasks.get(session_id)
+    relay_snapshot = handle.status_snapshot if handle is not None else None
+    fallback = snapshot if snapshot is not None else relay_snapshot
+
     if cached is not None:
         live, source = cached, "cache"
     elif persisted is not None:
         live, source = persisted.live_status, "persisted"
-    elif snapshot is not None:
-        live, source = snapshot.live_status, "snapshot"
+    elif fallback is not None:
+        live = fallback.live_status
+        source = "snapshot" if snapshot is not None else "relay_snapshot"
     else:
         live, source = None, "unknown"
 
-    conv = persisted if persisted is not None else snapshot
+    conv = persisted if persisted is not None else fallback
     if snapshot is not None and session_id in _intentional_stop_sessions:
         # A Stop can arrive while the sweep refreshes its row.
         decision = "intentional_stop"
@@ -7293,7 +7299,6 @@ async def _runner_disconnect_requires_failure(
     else:
         decision = "idle_no_failure"
 
-    handle = _runner_relay_tasks.get(session_id)
     _logger.warning(
         "Runner disconnect for session=%s: %s (status=%s source=%s)",
         session_id,
@@ -7310,7 +7315,7 @@ async def _runner_disconnect_requires_failure(
             status_source=source,
             cached_session_status=cached,
             persisted_session_status=persisted.live_status if persisted is not None else None,
-            snapshot_session_status=snapshot.live_status if snapshot is not None else None,
+            snapshot_session_status=fallback.live_status if fallback is not None else None,
             status_lookup=lookup,
             session_kind=conv.kind if conv is not None else None,
             parent_session_id=conv.parent_conversation_id if conv is not None else None,
@@ -8344,6 +8349,8 @@ def _ensure_runner_relay(
     runner_id: str | None,
     runner_client: httpx.AsyncClient | None,
     conversation_store: ConversationStore | None = None,
+    *,
+    conversation: Conversation | None = None,
 ) -> _RelayHandle | None:
     """
     Start (or replace) the SSE relay for ``session_id``.
@@ -8362,6 +8369,8 @@ def _ensure_runner_relay(
         ``None`` skips relay.
     :param conversation_store: Store for persisting items from
         the runner's SSE stream. ``None`` disables persistence.
+    :param conversation: Row already read by the caller. Its known status
+        is retained as a fallback for this runner binding, outside the live cache.
     :returns: The active relay handle, or ``None`` when no runner is
         bound.
     """
@@ -8414,7 +8423,27 @@ def _ensure_runner_relay(
             ),
             name=f"runner-relay-{session_id}",
         )
-    handle = _RelayHandle(runner_id=runner_id, task=task, ready=ready)
+    # A heartbeat-only stream may never repeat the pre-handoff idle edge.
+    # Retain only immutable status metadata for this relay's lifetime.
+    status_snapshot = (
+        _RelayStatusSnapshot(
+            live_status=conversation.live_status,
+            kind=conversation.kind,
+            parent_conversation_id=conversation.parent_conversation_id,
+            runner_id=runner_id,
+            host_id=conversation.host_id,
+            updated_at=conversation.updated_at,
+        )
+        if conversation is not None
+        and conversation.id == session_id
+        and conversation.runner_id == runner_id
+        and conversation.live_status is not None
+        and conversation.live_status in {"idle", "running", "waiting", "failed"}
+        else None
+    )
+    handle = _RelayHandle(
+        runner_id=runner_id, task=task, ready=ready, status_snapshot=status_snapshot
+    )
     _runner_relay_tasks[session_id] = handle
 
     def _on_done(t: asyncio.Task[None]) -> None:
@@ -8445,6 +8474,8 @@ async def _ensure_runner_relay_ready_impl(
     runner_id: str | None,
     runner_client: httpx.AsyncClient | None,
     conversation_store: ConversationStore | None = None,
+    *,
+    conversation: Conversation | None = None,
 ) -> _RelayHandle | None:
     """
     Start the runner SSE relay and wait for its subscription ack.
@@ -8461,6 +8492,8 @@ async def _ensure_runner_relay_ready_impl(
     :param runner_client: HTTP client pointed at ``runner_id``.
         ``None`` skips relay setup.
     :param conversation_store: Store for persisting relayed items.
+    :param conversation: Row already read by the caller, retained as a
+        disconnect-status fallback by the relay.
     :returns: The active relay handle, or ``None`` when no runner is
         bound.
     :raises OmnigentError: If the relay cannot observe the
@@ -8471,6 +8504,7 @@ async def _ensure_runner_relay_ready_impl(
         runner_id,
         runner_client,
         conversation_store,
+        conversation=conversation,
     )
     if handle is None or handle.ready.is_set():
         return handle
@@ -8888,6 +8922,7 @@ async def _wake_parent_for_blocked_child(
         parent_conv.runner_id,
         runner_client,
         conversation_store,
+        conversation=parent_conv,
     )
     body = SessionEventInput(
         type="message",
@@ -10555,6 +10590,7 @@ async def _create_session_from_existing_agent(
                 conv.runner_id,
                 runner_client,
                 conversation_store,
+                conversation=conv,
             )
             # Dispatch (not a plain forward) so native-terminal sessions take the
             # single-writer bypass — otherwise the forwarder's echo duplicates the kickoff.

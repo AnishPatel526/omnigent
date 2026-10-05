@@ -67,12 +67,22 @@ both ends.
   or error labels. Running and waiting sessions still fail on disconnect;
   `fail_idle_top_level` applies only to top-level startup failures.
 
-  `status_source` is `cache`, `persisted`, `snapshot`, or `unknown`, alongside
-  `cached_session_status`, `persisted_session_status`, `snapshot_session_status`,
-  and `status_lookup` (`not_needed`, `found`, `missing`, or `error`). On a cache
-  miss, the sweep refreshes its snapshot; both paths recheck the cache after
-  the read. An unavailable read falls back to the sweep's snapshot, or reports
-  a failure when the relay has no known state.
+  `status_source` is `cache`, `persisted`, `snapshot`, `relay_snapshot`, or
+  `unknown`, alongside `cached_session_status`, `persisted_session_status`,
+  `snapshot_session_status`, and `status_lookup` (`not_needed`, `found`,
+  `missing`, or `error`). Both paths read a fresh row on a cache miss and
+  recheck the cache after the read. A missing or failed read falls back to the
+  sweep's snapshot (`snapshot`) or the known status retained when the relay
+  adopted its runner binding (`relay_snapshot`). Without any known state,
+  the disconnect still reports a failure.
+
+  Adoption snapshots stay outside the live cache: an old saved status must
+  not override a newer row written by another server. They belong to one
+  relay binding and are discarded when it ends or is replaced. A quiet
+  Claude subsession can emit only heartbeats after handoff, so retaining its
+  saved idle state avoids a false failure if the later status lookup fails.
+  A readable running/waiting row still takes precedence, including when
+  that persisted state is stale; this fallback does not repair stale writes.
 
   The row includes the active `turn_id` and, when available, `session_kind`,
   `parent_session_id`, `runner_id`, `host_id`, and `conversation_updated_at`.
@@ -122,6 +132,7 @@ uv run --no-sync pytest -q tests/runner/transports/ws_tunnel/test_serve.py \
   tests/runner/transports/ws_tunnel/test_frames.py \
   tests/server/integration/test_runner_tunnel_route.py \
   tests/server/routes/test_sessions_runner_relay.py \
+  tests/server/integration/test_sessions_tunnel_three_layer.py \
   tests/server/routes/test_subagent_status.py \
   tests/server/test_runner_session_init.py \
   tests/runner/test_suppress_recovery_turn.py \
@@ -140,3 +151,10 @@ the child should remain idle with a warning whose decision is
 `idle_no_failure`, no disconnect error in its transcript, and no Failed
 activity in its parent's transcript. Repeat with a running child to confirm
 that interrupted work still produces `runner_disconnected`.
+
+For handoff handling, reconnect an idle child's runner to a fresh server,
+then drop the runner after its heartbeat-only relay is ready. In a test
+environment, make the disconnect-time conversation lookup fail or return no
+row. The warning should report `status_source = relay_snapshot` and
+`decision = idle_no_failure`. Repeat after persisting a new running status:
+the fresh row must win and the interruption must still fail.

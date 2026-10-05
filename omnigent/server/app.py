@@ -3610,6 +3610,7 @@ def create_app(
                     runner_id,
                     routed.client,
                     conversation_store,
+                    conversation=conv,
                 )
                 # The session's terminal exists as of the handshake above, so its
                 # model catalogs are answerable now. Warming them here is what
