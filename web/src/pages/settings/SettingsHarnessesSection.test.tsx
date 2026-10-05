@@ -40,6 +40,37 @@ vi.mock("@/hooks/useSkillContent", () => ({
     return contentQuery;
   },
 }));
+let mcpResult: {
+  data?: {
+    tools: { name: string; description: string | null }[];
+    connection: string;
+    truncated: boolean;
+  };
+  error?: unknown;
+  isPending: boolean;
+} = {
+  data: {
+    tools: [{ name: "read_docs", description: "Read documentation" }],
+    connection: "connected",
+    truncated: false,
+  },
+  isPending: false,
+};
+let mcpLookups: [string, string, string, string | undefined, boolean][] = [];
+let mcpSources: (string | undefined)[] = [];
+vi.mock("@/hooks/useMcpServerTools", () => ({
+  useMcpServerTools: (
+    host: string,
+    harness: string,
+    server: string,
+    plugin: string | undefined,
+    { enabled, sourceId }: { enabled: boolean; sourceId?: string },
+  ) => {
+    mcpLookups.push([host, harness, server, plugin, enabled]);
+    if (enabled) mcpSources.push(sourceId);
+    return enabled ? mcpResult : { isPending: true };
+  },
+}));
 const STARTUP: HarnessStartup = {
   command: "claude",
   resolved_path: "/opt/bin/claude",
@@ -154,6 +185,16 @@ afterEach(() => {
   contentQuery = { data: CONTENT, isPending: false };
   contentLookup = null;
   contentSource = undefined;
+  mcpResult = {
+    data: {
+      tools: [{ name: "read_docs", description: "Read documentation" }],
+      connection: "connected",
+      truncated: false,
+    },
+    isPending: false,
+  };
+  mcpLookups = [];
+  mcpSources = [];
   cleanup();
   hosts = [];
   inventory = INVENTORY;
@@ -294,14 +335,15 @@ describe("Harness details", () => {
     expect(screen.getByText(/workspace's .omnigent/)).toBeTruthy();
   });
 
-  it("lists MCP servers and skills as plain rows with host-reported details only", () => {
+  it("keeps tool discovery lazy and shows host-reported details", () => {
     hosts = [ONLINE];
     renderHarnesses("claude-native");
 
-    // No tool list from the host: no count, nothing to open or expand.
+    // Collapsed rows have no tool count or status until probed.
     const linear = screen.getByTestId("catalog-row-linear");
     expect(within(linear).getByText("toolkit plugin")).toBeTruthy();
-    expect(linear.tagName).not.toBe("BUTTON");
+    expect(linear.tagName).toBe("BUTTON");
+    expect(mcpLookups.every((lookup) => !lookup[4])).toBe(true);
     expect(screen.queryByText(/\d+ tools?/)).toBeNull();
 
     selectTab("Skills · 1");
@@ -543,4 +585,134 @@ it("requests a host update instead of guessing installed skill identity", () => 
   expect(screen.getByText("Update my-laptop to read installed plugin skills.")).toBeTruthy();
   expect(screen.getByTestId("catalog-row-lint").tagName).not.toBe("BUTTON");
   expect(contentLookup).toBeNull();
+});
+
+it("probes only the expanded server, showing its tools, count and status", () => {
+  hosts = [ONLINE];
+  renderHarnesses("claude-native");
+  expect(mcpLookups.every((lookup) => !lookup[4])).toBe(true);
+  expect(screen.queryByRole("img", { name: "Connected" })).toBeNull();
+  fireEvent.click(screen.getByTestId("catalog-row-linear"));
+  expect(mcpLookups).toContainEqual([ONLINE.host_id, "claude", "linear", "toolkit", true]);
+  expect(mcpLookups.some((lookup) => lookup[2] === "github" && lookup[4])).toBe(false);
+  expect(screen.getByText("read_docs")).toBeTruthy();
+  expect(screen.getByText("· 1 tool")).toBeTruthy();
+  expect(screen.getByRole("img", { name: "Connected" })).toBeTruthy();
+  fireEvent.click(screen.getByTestId("catalog-row-linear"));
+  expect(screen.queryByText("read_docs")).toBeNull();
+});
+
+it("uses the same lazy tools accordion on plugin pages", () => {
+  hosts = [ONLINE];
+  renderHarnesses("claude-native");
+  selectTab("Plugins · 1");
+  fireEvent.click(screen.getByTestId("catalog-row-toolkit"));
+  selectTab("MCPs · 1");
+  expect(mcpLookups.every((lookup) => !lookup[4])).toBe(true);
+  fireEvent.click(screen.getByTestId("catalog-row-linear"));
+  expect(screen.getByText("read_docs")).toBeTruthy();
+  expect(mcpLookups).toContainEqual([ONLINE.host_id, "claude", "linear", "toolkit", true]);
+});
+
+it.each([
+  [501, "Update my-laptop to list tools."],
+  [502, "Couldn't reach github."],
+  [503, "Host is busy probing other MCP servers. Collapse and reopen to retry."],
+  [504, "Couldn't reach github."],
+])("shows the MCP error for %s", (status, message) => {
+  hosts = [ONLINE];
+  mcpResult = { error: new ApiError("private", status, null), isPending: false };
+  renderHarnesses("claude-native");
+  fireEvent.click(screen.getByTestId("catalog-row-github"));
+  expect(screen.getByText(message)).toBeTruthy();
+  expect(screen.queryByText("private")).toBeNull();
+});
+
+it("hides MCP expansion on old-server 404", () => {
+  hosts = [ONLINE];
+  mcpResult = { error: new ApiError("404", 404, null), isPending: false };
+  renderHarnesses("claude-native");
+  fireEvent.click(screen.getByTestId("catalog-row-github"));
+  expect(screen.getByTestId("catalog-row-github").tagName).not.toBe("BUTTON");
+  expect(screen.getByTestId("catalog-row-linear").tagName).not.toBe("BUTTON");
+  expect(screen.queryByText("Couldn't reach github.")).toBeNull();
+});
+
+it.each([
+  [
+    "needs_auth",
+    "Authentication required. Harness sign-in credentials cannot be reused for this probe.",
+  ],
+  ["timeout", "MCP probe timed out."],
+  ["unreachable", "Couldn't reach this MCP server."],
+  ["unsupported", "This MCP configuration cannot be probed from the host."],
+])("reports probe status %s without a tool count", (connection, label) => {
+  hosts = [ONLINE];
+  mcpResult = { data: { tools: [], connection, truncated: false }, isPending: false };
+  renderHarnesses("claude-native");
+  fireEvent.click(screen.getByTestId("catalog-row-github"));
+  expect(screen.getByRole("img", { name: label })).toBeTruthy();
+  expect(screen.getByText(label)).toBeTruthy();
+  expect(screen.queryByText(/· 0 tools/)).toBeNull();
+});
+
+it.each([false, true])("uses installed MCP identity and honors enabled=%s", (enabled) => {
+  hosts = [ONLINE];
+  inventory = {
+    ...INVENTORY,
+    context: {
+      ...INVENTORY.context,
+      plugins: ["first", "second"].map((marketplace) => ({
+        id: marketplace,
+        name: "toolkit",
+        harness: "claude",
+        marketplace,
+        enabled,
+        skills: [],
+        mcp_servers: ["docs"],
+        mcp_entries: [{ id: `${marketplace}-mcp`, name: "docs" }],
+      })),
+    },
+  };
+  renderHarnesses("claude-native");
+  selectTab("Plugins · 2");
+  fireEvent.click(screen.getAllByTestId("catalog-row-toolkit")[1]);
+  selectTab("MCPs · 1");
+  const row = screen.getByTestId("catalog-row-docs");
+  fireEvent.click(row);
+  if (enabled) {
+    expect(mcpSources).toContain("second-mcp");
+    expect(mcpSources).not.toContain("first-mcp");
+    expect(screen.getByText("read_docs")).toBeTruthy();
+  } else {
+    expect(row.tagName).not.toBe("BUTTON");
+    expect(screen.getByText(/This plugin is disabled/)).toBeTruthy();
+    expect(mcpSources).toEqual([]);
+    expect(mcpLookups.every((lookup) => !lookup[4])).toBe(true);
+  }
+});
+
+it("requests a host update instead of guessing installed MCP identity", () => {
+  hosts = [ONLINE];
+  inventory = {
+    ...INVENTORY,
+    context: {
+      ...INVENTORY.context,
+      plugins: [
+        {
+          ...INVENTORY.context.plugins[0],
+          marketplace: "market",
+          enabled: true,
+          mcp_servers: ["docs"],
+        },
+      ],
+    },
+  };
+  renderHarnesses("claude-native");
+  selectTab("Plugins · 1");
+  fireEvent.click(screen.getByTestId("catalog-row-toolkit"));
+  selectTab("MCPs · 1");
+  expect(screen.getByText("Update my-laptop to inspect installed plugin MCP tools.")).toBeTruthy();
+  expect(screen.getByTestId("catalog-row-docs").tagName).not.toBe("BUTTON");
+  expect(mcpSources).toEqual([]);
 });
