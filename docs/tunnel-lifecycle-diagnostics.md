@@ -91,6 +91,19 @@ False` after earlier rows for the same `runner_id` is a new process; `pid`
 confirms it. A repeating `connection_age_s` across drops points at an
 intermediary timeout rather than either endpoint.
 
+## Credential recovery
+
+`auth token refresh failed; falling back to previous token` describes a
+failed renewal attempt, not the cause of the preceding socket close. Check
+the exception type and subsequent handshake result: a rejected old bearer
+can keep the runner disconnected even after network connectivity returns.
+
+Delegated runner credentials and stored or refreshed OIDC logins do not
+require the Databricks executor to import. The SDK path loads only when
+those providers do not supply a token; an import failure there still permits
+the existing managed-mint fallback. This does not repair an inconsistent
+installation or provide a credential when every configured provider fails.
+
 ## Build identity
 
 Databricks App deploys append the checked-out commit to the stamped version
