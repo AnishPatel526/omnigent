@@ -272,7 +272,8 @@ def sse_tool_call_response(
     Build a complete SSE stream for a function call response.
 
     :param tool_calls: List of tool call dicts, each with
-        ``"call_id"``, ``"name"``, and ``"arguments"`` keys.
+        ``"call_id"``, ``"name"``, and ``"arguments"`` keys, plus an optional
+        ``"namespace"`` for native Codex MCP calls.
     :param model: Model name to include in the response.
     :param usage: Optional token-usage overrides.
     :returns: SSE-formatted string.
@@ -289,6 +290,7 @@ def sse_tool_call_response(
                 "name": tc["name"],
                 "arguments": tc.get("arguments", "{}"),
                 "status": "completed",
+                **({"namespace": tc["namespace"]} if "namespace" in tc else {}),
             }
         )
     response_obj = {
