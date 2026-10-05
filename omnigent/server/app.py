@@ -3704,6 +3704,7 @@ def create_app(
     # except (a hidden failure). No host_store = host support is simply
     # not enabled (host connects get 404), rather than silently broken.
     if host_store is not None:
+        from omnigent.server.routes.harness_startup import create_harness_startup_router
         from omnigent.server.routes.host_tunnel import create_host_tunnel_router
         from omnigent.server.routes.hosts import create_hosts_router
         from omnigent.server.routes.mcp_servers import create_mcp_servers_router
@@ -3752,6 +3753,11 @@ def create_app(
             ),
             prefix="/v1",
             tags=["skills"],
+        )
+        app.include_router(
+            create_harness_startup_router(host_registry, host_store, auth_provider=auth_provider),
+            prefix="/v1",
+            tags=["hosts"],
         )
         app.include_router(
             create_mcp_servers_router(host_registry, host_store, auth_provider=auth_provider),

@@ -9,13 +9,26 @@ import { MemoryRouter } from "react-router-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { HarnessInventory } from "@/hooks/useHarnessInventory";
-import type { Host } from "@/hooks/useHosts";
+import { ApiError } from "@/lib/sessionsApi";
+import type { HarnessStartup, Host } from "@/hooks/useHosts";
 import { SettingsHarnessesSection } from "./SettingsHarnessesSection";
 
+const STARTUP: HarnessStartup = {
+  command: "claude",
+  resolved_path: "/opt/bin/claude",
+  command_source: "config",
+  arg_count: 2,
+};
+let startupError: ApiError | null = null;
+const startupCalls = vi.fn();
 let hosts: Host[] = [];
 vi.mock("@/hooks/useHosts", async (importActual) => ({
   ...(await importActual()),
   useHosts: () => ({ data: hosts }),
+  useHarnessStartup: (hostId: string, harness: string) => {
+    startupCalls(hostId, harness);
+    return { data: startupError ? undefined : STARTUP, error: startupError, isPending: false };
+  },
 }));
 
 // Claude has two MCP servers (one from the toolkit plugin), a skill, and that
@@ -113,6 +126,8 @@ afterEach(() => {
   inventory = INVENTORY;
   harnessInstall = true;
   setupDialogProps.mockReset();
+  startupCalls.mockClear();
+  startupError = null;
 });
 
 describe("Harnesses grid", () => {
@@ -240,6 +255,10 @@ describe("Harness details", () => {
     // The credential lives under the Settings tab.
     selectTab("Settings");
     expect(screen.getByText("AI Gateway")).toBeTruthy();
+    expect(screen.getByText("/opt/bin/claude")).toBeTruthy();
+    expect(screen.getByText("2 configured arguments (values hidden)")).toBeTruthy();
+    expect(screen.getByText(/harness.claude-native.command/)).toBeTruthy();
+    expect(screen.getByText(/workspace's .omnigent/)).toBeTruthy();
   });
 
   it("lists MCP servers and skills as plain rows with host-reported details only", () => {
@@ -310,5 +329,33 @@ describe("Harness details", () => {
     renderHarnesses("not-a-harness");
 
     expect(screen.getByRole("heading", { name: "Harnesses" })).toBeTruthy();
+  });
+});
+
+describe("Launch settings compatibility", () => {
+  it.each([404, 501, 502])("keeps the credential when startup returns %s", (status) => {
+    hosts = [ONLINE];
+    startupError = new ApiError("unavailable", status, null);
+    renderHarnesses("claude-native");
+    selectTab("Settings");
+    expect(screen.getByText("Signed in")).toBeTruthy();
+    expect(screen.queryByText("Path to binary")).toBeNull();
+    if (status === 501)
+      expect(screen.getByText("Update my-laptop to see launch settings.")).toBeTruthy();
+    if (status === 502)
+      expect(screen.getByText("Couldn't load launch settings from my-laptop.")).toBeTruthy();
+    if (status === 404) expect(screen.queryByText(/launch settings/)).toBeNull();
+  });
+
+  it("uses the host selected on the grid", () => {
+    hosts = [ONLINE, { ...ONLINE, host_id: "h2", name: "second-host" }];
+    renderHarnesses();
+    fireEvent.pointerDown(screen.getByRole("button", { name: "my-laptop" }), {
+      button: 0,
+      ctrlKey: false,
+    });
+    fireEvent.click(screen.getByRole("menuitem", { name: "second-host" }));
+    fireEvent.click(screen.getByTestId("harness-settings-claude-native"));
+    expect(startupCalls).toHaveBeenLastCalledWith("h2", "claude-native");
   });
 });

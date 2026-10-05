@@ -2626,6 +2626,49 @@
         "title": "HTTPValidationError",
         "type": "object"
       },
+      "HarnessStartup": {
+        "description": "The only launch metadata allowed across the host tunnel and HTTP API.",
+        "properties": {
+          "arg_count": {
+            "format": "int64",
+            "minimum": 0.0,
+            "title": "Arg Count",
+            "type": "integer"
+          },
+          "command": {
+            "title": "Command",
+            "type": "string"
+          },
+          "command_source": {
+            "enum": [
+              "env",
+              "config",
+              "default"
+            ],
+            "title": "Command Source",
+            "type": "string"
+          },
+          "resolved_path": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Resolved Path"
+          }
+        },
+        "required": [
+          "command",
+          "resolved_path",
+          "command_source",
+          "arg_count"
+        ],
+        "title": "HarnessStartup",
+        "type": "object"
+      },
       "HeartbeatEvent": {
         "description": "Keepalive event emitted on a fixed cadence during streaming.\n\nLets consumers detect stalled producers via missed-interval\ntiming. Cadence is set by `_HEARTBEAT_INTERVAL_S` in\n`omnigent/runtime/workflow.py` (15 seconds at the time of\nwriting). Wire shape matches the existing emit at\n`omnigent/runtime/workflow.py:4636-4639`.\n\nPer `designs/SERVER_HARNESS_CONTRACT.md` \u00a7Heartbeats, the\nevent MAY carry timing metadata so consumers can do richer\ndead-detection than \"did anything arrive\":\n\n- `server_time` is the producer's wall-clock at emission,\n  letting consumers detect clock drift between producer and\n  consumer.\n- `last_event_seq` is the `sequence_number` of the most\n  recent NON-heartbeat event (or `None` when this is the\n  first heartbeat before any user-visible event), letting\n  consumers detect dropped events on reconnect.\n\nBoth fields are optional on the wire (`None` round-trips as\nomitted) so older AP\u2192harness pairs that pre-date the field\naddition still parse cleanly.",
         "properties": {
@@ -10080,6 +10123,58 @@
           }
         },
         "summary": "Get Host Model Options",
+        "tags": [
+          "hosts"
+        ]
+      }
+    },
+    "/v1/hosts/{host_id}/harnesses/{harness}/startup": {
+      "get": {
+        "description": "Read the binary, source, and argument count; never argument values.",
+        "operationId": "get_harness_startup_v1_hosts__host_id__harnesses__harness__startup_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "host_id",
+            "required": true,
+            "schema": {
+              "title": "Host Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "harness",
+            "required": true,
+            "schema": {
+              "title": "Harness",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HarnessStartup"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Harness Startup",
         "tags": [
           "hosts"
         ]

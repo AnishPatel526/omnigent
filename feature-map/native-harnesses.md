@@ -29,6 +29,12 @@ implements them separately, so a fix for one harness does not reach the others.
   connection ends; reconnect can receive fresh events. Distinguish a native
   CLI disconnect, a runner going offline, and a browser stream reconnect.
 
+- `launch-settings`: Settings → Harnesses → a configured Claude or Codex →
+  Settings (or its card's gear). Shows the selected host's binary, source, and
+  configured argument count, read-only. Argument and environment values stay
+  on the host. Workspace config can override these host defaults. Behind
+  `harness_settings_ui`; other harnesses keep their credential card only.
+
 ## How to get to it (user POV)
 
 **Web:** start a new session, choose the harness in the harness picker, open its
@@ -74,6 +80,16 @@ skill when one is linked above.
 verify-env run -- python -m pytest <test> --ui-skip-build --video=on \
   --output="$VERIFY_EVIDENCE/native-harnesses"
 ```
+
+**Launch settings (own environment):** enable `harness_settings_ui`, connect a
+host with Claude/Codex configured, and put a command and two args under
+`harness.claude-native` / `harness.codex-native` in its `~/.omnigent/config.yaml`.
+Open each harness through both its gear and card → Settings. Check the binary,
+source, count of two (no values), and credential. Select a second host on the
+grid and repeat. An older host shows an update message; an older server hides
+the extra fields. Resolver and raw-tunnel checks:
+`tests/host/test_harness_startup.py`,
+`tests/server/integration/test_host_tunnel_route.py::test_startup_http_through_real_tunnel`.
 
 Cross-harness journeys:
 
