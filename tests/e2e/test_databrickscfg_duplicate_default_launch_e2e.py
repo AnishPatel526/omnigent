@@ -1,19 +1,10 @@
-"""Launch-crash e2e test: a duplicated ``[DEFAULT]`` in ``~/.databrickscfg``.
-
-Journey: the Databricks VS Code extension has left a second ``[DEFAULT]``
-block in ``~/.databrickscfg``, so ``host``/``token`` repeat under DEFAULT. The
-user launches ``omnigent run <agent>`` with no other credentials configured.
-While resolving ambient Databricks credentials for the server headers the CLI
-parses that file with a strict ``configparser.ConfigParser``; the duplicate
-option raises ``DuplicateOptionError`` and the launch dies on the crash-handler
-screen instead of starting the session.
+"""Verify a duplicated ``[DEFAULT]`` in ``~/.databrickscfg`` does not crash ``omnigent run``.
 
 The test spawns the real ``omnigent`` console script under a pseudo-TTY with an
-isolated ``$HOME`` and asserts the launch never reaches the crash handler with
-that error. It runs twice: with ``databricks-sdk`` importable (its config
-loader parses the file) and with the SDK hidden, as in a ``uv tool install
-omnigent`` without the extra (the ``_read_databrickscfg_file_fallback`` path in
-the crash report).
+isolated ``$HOME`` and asserts the launch never reaches the crash handler. It
+runs twice: with ``databricks-sdk`` importable (its config loader parses the
+file) and with the SDK hidden, as in a ``uv tool install omnigent`` without the
+extra (the ``_read_databrickscfg_file_fallback`` path in the crash report).
 
 Usage::
 
@@ -36,19 +27,15 @@ pexpect = pytest.importorskip("pexpect")
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 
-# A crash surfaces seconds after the local server boots; a healthy launch runs
-# into runner bring-up (up to ~106s worst case, see test_repl_approval_e2e.py),
-# so the ceiling only bounds the healthy path.
+# Both outcomes surface seconds after the local server boots: the crash prompt,
+# or the first post-credential-read marker ("Connecting…"), which prints before
+# runner bring-up. The ceiling is headroom for a slow CI host, not a budget.
 _LAUNCH_TIMEOUT_S = 120
 
-# Ambient credentials and proxy settings that would change the credential chain
-# or route the loopback server through a proxy; ``OMNIGENT_*`` (auth modes,
-# state dirs, leaked runner/host identity) is cleared by prefix.
+# Ambient credentials and proxy settings that would change the credential chain or
+# route the loopback server through a proxy; ``DATABRICKS_*`` and ``OMNIGENT_*``
+# (auth modes, state dirs, leaked runner/host identity) are cleared by prefix.
 _ENV_TO_CLEAR = (
-    "DATABRICKS_HOST",
-    "DATABRICKS_TOKEN",
-    "DATABRICKS_CONFIG_PROFILE",
-    "DATABRICKS_CONFIG_FILE",
     "ANTHROPIC_API_KEY",
     "OPENAI_API_KEY",
     "HTTP_PROXY",
@@ -60,7 +47,7 @@ _ENV_TO_CLEAR = (
     "all_proxy",
     "no_proxy",
 )
-_ENV_PREFIXES_TO_CLEAR = ("OMNIGENT_",)
+_ENV_PREFIXES_TO_CLEAR = ("DATABRICKS_", "OMNIGENT_")
 
 # The shape the Databricks VS Code extension leaves behind.
 _DUPLICATE_DEFAULT_CFG = """\
@@ -200,6 +187,8 @@ def _launch_until_crash_or_past_credential_read(env: dict[str, str], home: Path)
         if index == 0:
             child.sendline("n")
             child.expect([pexpect.EOF, pexpect.TIMEOUT], timeout=30)
+        elif index == 3:
+            log.write(f"\n[test] no crash prompt or startup marker within {_LAUNCH_TIMEOUT_S}s\n")
     finally:
         child.close(force=True)
     return _strip_ansi(log.getvalue())

@@ -214,7 +214,11 @@ def _read_databrickscfg_file_fallback(profile: str | None = None) -> DatabricksC
     # strict=False: tolerate the duplicated [DEFAULT] some tools (e.g. the Databricks
     # VS Code extension) leave in ~/.databrickscfg; the last value wins.
     config = configparser.ConfigParser(strict=False)
-    config.read(cfg_path)
+    try:
+        config.read(cfg_path)
+    except configparser.Error as exc:
+        logger.warning("Ignoring unparseable Databricks config %s: %s", cfg_path, exc)
+        return None
 
     resolved_profile = profile or os.environ.get("DATABRICKS_CONFIG_PROFILE")
     if resolved_profile and resolved_profile in config:
@@ -411,7 +415,11 @@ def _read_databrickscfg_host(profile: str | None = None) -> str | None:
 
     # strict=False: tolerate duplicate sections/keys in ~/.databrickscfg.
     config = configparser.ConfigParser(strict=False)
-    config.read(cfg_path)
+    try:
+        config.read(cfg_path)
+    except configparser.Error as exc:
+        logger.warning("Ignoring unparseable Databricks config %s: %s", cfg_path, exc)
+        return None
 
     resolved_profile = profile or os.environ.get("DATABRICKS_CONFIG_PROFILE")
     if resolved_profile:
@@ -935,7 +943,7 @@ def _read_databrickscfg_no_inheritance() -> configparser.ConfigParser | None:
     cfg_path = Path(os.environ.get("DATABRICKS_CONFIG_FILE") or (Path.home() / ".databrickscfg"))
     if not cfg_path.exists():
         return None
-    config = configparser.ConfigParser(default_section=_NO_DEFAULT_INHERITANCE)
+    config = configparser.ConfigParser(default_section=_NO_DEFAULT_INHERITANCE, strict=False)
     try:
         config.read(cfg_path)
     except configparser.Error:

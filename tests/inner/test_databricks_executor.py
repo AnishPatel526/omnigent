@@ -2585,6 +2585,43 @@ def test_workspace_id_for_profile_tolerates_duplicate_default_section(
     assert databrickscfg_workspace_id_for_profile("DEFAULT") == "2222222222222222"
 
 
+def test_workspace_id_for_host_tolerates_duplicate_default_section(
+    tmp_path: _Path, monkeypatch: pytest.MonkeyPatch, clean_databricks_env: None
+) -> None:
+    """
+    Host-based ``workspace_id`` lookup still matches profiles when the cfg
+    carries a duplicate ``[DEFAULT]``; the repeated block resolves to its
+    last-defined values.
+    """
+    cfg_path = tmp_path / "databrickscfg"
+    cfg_path.write_text(
+        textwrap.dedent(
+            """
+            [DEFAULT]
+            host = https://first.cloud.databricks.com
+            workspace_id = 1111111111111111
+
+            [DEFAULT]
+            host = https://second.cloud.databricks.com
+            workspace_id = 2222222222222222
+
+            [acme]
+            host = https://acme.databricks.com
+            workspace_id = 1965859176160743
+            auth_type = databricks-cli
+            """
+        ).lstrip()
+    )
+    monkeypatch.setenv("DATABRICKS_CONFIG_FILE", str(cfg_path))
+
+    assert databrickscfg_workspace_id_for_host("https://acme.databricks.com") == "1965859176160743"
+    assert (
+        databrickscfg_workspace_id_for_host("https://second.cloud.databricks.com")
+        == "2222222222222222"
+    )
+    assert databrickscfg_workspace_id_for_host("https://first.cloud.databricks.com") is None
+
+
 @pytest.mark.parametrize("profile", [None, "DEFAULT"], ids=["ambient", "explicit-default"])
 def test_read_databrickscfg_falls_back_when_sdk_rejects_duplicate_default_section(
     profile: str | None,
@@ -2636,6 +2673,30 @@ def test_resolve_databricks_auth_uses_pat_when_sdk_rejects_duplicate_default_sec
     assert isinstance(auth, _DatabricksBearerAuth)
     assert host == "https://second.cloud.databricks.com"
     assert auth.current_token() == "dapi-second"
+
+
+def test_file_readers_ignore_unparseable_databrickscfg(
+    tmp_path: _Path,
+    monkeypatch: pytest.MonkeyPatch,
+    clean_databricks_env: None,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """
+    A ``~/.databrickscfg`` malformed beyond duplicate entries (here a key before
+    any section header) resolves to no credentials, with a warning, instead of
+    escaping as ``configparser.Error`` from either file reader or from the
+    SDK-first reader that falls back to them.
+    """
+    cfg_path = tmp_path / "databrickscfg"
+    cfg_path.write_text("host = https://orphan.cloud.databricks.com\n[DEFAULT]\ntoken = dapi\n")
+    monkeypatch.setenv("DATABRICKS_CONFIG_FILE", str(cfg_path))
+
+    with caplog.at_level("WARNING", logger="omnigent.inner.databricks_executor"):
+        assert _read_databrickscfg_file_fallback() is None
+        assert _read_databrickscfg_host() is None
+        assert _read_databrickscfg() is None
+
+    assert any("unparseable" in record.getMessage() for record in caplog.records)
 
 
 def test_databrickscfg_workspace_id_for_host_reads_matching_profile(

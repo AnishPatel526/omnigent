@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from pathlib import Path
 
 import pytest
@@ -139,19 +140,11 @@ def test_duplicate_default_sections_resolve_instead_of_crashing(
 def test_sdk_rejecting_duplicate_default_sections_falls_through_to_cfg(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    # Re-enable the real SDK ``Config``: its strict parser raises
-    # ``configparser.DuplicateOptionError`` (not a ``ValueError``) on the
-    # duplicated ``[DEFAULT]``. The resolver must fall through to the
-    # tolerant cfg path instead of propagating the parse error.
+    # Restore the real SDK Config: its strict parser raises DuplicateOptionError
+    # (not ValueError); the resolver must fall through to the tolerant cfg path.
     monkeypatch.setattr("databricks.sdk.config.Config", _RealSdkConfig)
-    for var in (
-        "DATABRICKS_HOST",
-        "DATABRICKS_TOKEN",
-        "DATABRICKS_CLIENT_ID",
-        "DATABRICKS_CLIENT_SECRET",
-        "DATABRICKS_AUTH_TYPE",
-    ):
-        monkeypatch.delenv(var, raising=False)
+    for var in [name for name in os.environ if name.startswith("DATABRICKS_")]:
+        monkeypatch.delenv(var)
     cfg = _write_cfg(
         tmp_path,
         (
@@ -169,6 +162,20 @@ def test_sdk_rejecting_duplicate_default_sections_falls_through_to_cfg(
     creds = resolve_databricks_workspace(profile=None)
 
     assert creds == WorkspaceCreds(host="https://second.example.com", token="second-token")
+
+
+def test_unparseable_cfg_reports_no_credentials_instead_of_crashing(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    # A key before any section header is malformed beyond what strict=False
+    # tolerates; the resolver must end in its usual OSError, not a parse error.
+    cfg = _write_cfg(tmp_path, "host = https://orphan.example.com\n[DEFAULT]\ntoken = t\n")
+    monkeypatch.setenv("DATABRICKS_CONFIG_FILE", str(cfg))
+
+    with caplog.at_level("WARNING"), pytest.raises(OSError):
+        resolve_databricks_workspace(profile=None)
+
+    assert any("unparseable" in record.getMessage() for record in caplog.records)
 
 
 def test_named_profile_overrides_default(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

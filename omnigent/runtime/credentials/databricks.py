@@ -311,8 +311,7 @@ def _call_sdk_authenticate(profile: str | None) -> WorkspaceCreds | None:
     try:
         cfg = Config(profile=sdk_profile)
         headers = cfg.authenticate()
-    except (ValueError, configparser.Error) as exc:
-        # configparser.Error: the SDK parses strictly; the cfg path below tolerates duplicates.
+    except (ValueError, configparser.Error) as exc:  # the SDK parses the file strictly
         # INFO (not WARNING): expired tokens raise here. WARNING would
         # surface via root's lastResort handler to stderr, drowning the
         # clean ClickException. INFO still lands in cli-*.log; frames are
@@ -402,7 +401,11 @@ def _try_resolve_from_cfg(profile: str | None, cfg_path: Path) -> WorkspaceCreds
     # strict=False: tolerate the duplicated [DEFAULT] some tools (e.g. the Databricks
     # VS Code extension) leave in ~/.databrickscfg; the last value wins.
     config = configparser.ConfigParser(strict=False)
-    config.read(cfg_path)
+    try:
+        config.read(cfg_path)
+    except configparser.Error as exc:
+        _logger.warning("Ignoring unparseable Databricks config %s: %s", cfg_path, exc)
+        return None
 
     if profile is not None:
         # _read_section raises _SectionPresentButInvalid when the
