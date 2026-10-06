@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   ComposerHostTrigger,
@@ -45,13 +45,7 @@ describe("shared composer controls", () => {
     );
 
     for (const trigger of screen.getAllByRole("button")) {
-      expect(trigger).toHaveClass(
-        "min-w-10",
-        "md:min-w-11",
-        "px-0.5",
-        "md:px-1",
-        "max-w-[calc(50%-0.25rem)]",
-      );
+      expect(trigger).toHaveClass("min-w-10", "md:min-w-11", "px-1", "max-w-[calc(50%-0.25rem)]");
       expect(trigger).not.toHaveClass("max-w-[180px]");
       expect(trigger.querySelector("span")).toHaveClass("min-w-0", "truncate");
       for (const icon of trigger.querySelectorAll("svg")) {
@@ -95,6 +89,29 @@ describe("shared composer controls", () => {
     );
   });
 
+  it("keeps the model trigger clickable with an accessible, mobile-visible loading spinner", () => {
+    const onClick = vi.fn();
+    render(
+      <ComposerHarnessTrigger
+        label="Configure session"
+        model=""
+        icon={<span>Harness</span>}
+        loading
+        pending
+        onClick={onClick}
+      />,
+    );
+    const trigger = screen.getByRole("button", { name: "Configure session" });
+    const spinner = screen.getByRole("status", { name: "Loading model" });
+    expect(trigger).toBeEnabled();
+    expect(trigger).toHaveAttribute("aria-busy", "true");
+    expect(spinner.parentElement).toBe(trigger);
+    expect(screen.getByTestId("composer-agent-config-value")).not.toContainElement(spinner);
+    expect(screen.queryByLabelText("Model change pending")).toBeNull();
+    fireEvent.click(trigger);
+    expect(onClick).toHaveBeenCalledOnce();
+  });
+
   it("dispatches permission selections through the caller's handler", () => {
     const onSelect = vi.fn();
     render(
@@ -117,9 +134,179 @@ describe("shared composer controls", () => {
     fireEvent.keyDown(trigger, {
       key: "ArrowDown",
     });
-    fireEvent.click(screen.getByRole("menuitem", { name: "Plan" }));
+    fireEvent.click(screen.getByRole("menuitemradio", { name: "Plan" }));
     expect(onSelect).toHaveBeenCalledWith("plan");
   });
+
+  it("marks the selected permission mode and leaves the rest unchecked", () => {
+    render(
+      <ComposerPermissionPicker
+        label="Permission mode"
+        value="Auto"
+        selectedValue="auto"
+        options={[
+          { value: "default", label: "Manual" },
+          { value: "auto", label: "Auto" },
+          { value: "plan", label: "Plan" },
+        ]}
+        onSelect={vi.fn()}
+      />,
+    );
+    fireEvent.keyDown(screen.getByRole("button", { name: "Permission mode: Auto" }), {
+      key: "ArrowDown",
+    });
+    const selectedRow = screen.getByTestId("composer-permission-option-auto");
+    expect(selectedRow).toHaveAttribute("aria-checked", "true");
+    expect(
+      selectedRow.querySelector('[data-slot="dropdown-menu-radio-item-indicator"]'),
+    ).toBeInTheDocument();
+    for (const other of ["default", "plan"]) {
+      expect(screen.getByTestId(`composer-permission-option-${other}`)).toHaveAttribute(
+        "aria-checked",
+        "false",
+      );
+    }
+  });
+
+  it("marks no permission mode when the selected value is unknown", () => {
+    render(
+      <ComposerPermissionPicker
+        label="Permission mode"
+        value="Permission mode"
+        options={[
+          { value: "default", label: "Manual" },
+          { value: "auto", label: "Auto" },
+        ]}
+        onSelect={vi.fn()}
+      />,
+    );
+    fireEvent.keyDown(screen.getByRole("button", { name: "Permission mode: Permission mode" }), {
+      key: "ArrowDown",
+    });
+    for (const mode of ["default", "auto"]) {
+      expect(screen.getByTestId(`composer-permission-option-${mode}`)).toHaveAttribute(
+        "aria-checked",
+        "false",
+      );
+    }
+  });
+
+  it("exposes shared permission concepts without changing harness wire values", () => {
+    const { rerender } = render(
+      <ComposerPermissionPicker
+        label="Permission mode"
+        value="Plan"
+        harness="claude-native"
+        selectedValue="plan"
+        options={[{ value: "plan", label: "Plan" }]}
+        onSelect={vi.fn()}
+      />,
+    );
+    expect(screen.getByRole("button", { name: "Permission mode: Plan" })).toHaveAttribute(
+      "data-permission-concept",
+      "read-only",
+    );
+
+    rerender(
+      <ComposerPermissionPicker
+        label="Permission mode"
+        value="Read only"
+        harness="codex-native"
+        selectedValue="read-only"
+        options={[{ value: "default", label: "Automatic" }]}
+        onSelect={vi.fn()}
+      />,
+    );
+    const trigger = screen.getByRole("button", { name: "Permission mode: Read only" });
+    expect(trigger).toHaveAttribute("data-permission-concept", "read-only");
+    fireEvent.keyDown(trigger, { key: "ArrowDown" });
+    expect(screen.getByRole("menuitemradio", { name: "Automatic" })).toHaveAttribute(
+      "data-permission-concept",
+      "automatic",
+    );
+  });
+
+  it.each([false, true])(
+    "restores permission focus unless another menu has opened (next menu=%s)",
+    async (nextMenuOpen) => {
+      vi.useFakeTimers();
+      try {
+        render(
+          <>
+            <ComposerPermissionPicker
+              label="Permission mode"
+              value="Manual"
+              options={[{ value: "plan", label: "Plan" }]}
+              onSelect={vi.fn()}
+            />
+            <div role="menu" data-state="open" tabIndex={-1} data-testid="next-menu" />
+          </>,
+        );
+        const trigger = screen.getByRole("button", { name: "Permission mode: Manual" });
+        fireEvent.keyDown(trigger, { key: "ArrowDown" });
+        fireEvent.click(screen.getByRole("menuitemradio", { name: "Plan" }));
+        const nextMenu = screen.getByTestId("next-menu");
+        if (nextMenuOpen) nextMenu.focus();
+
+        await act(() => vi.runOnlyPendingTimersAsync());
+
+        expect(nextMenuOpen ? nextMenu : trigger).toHaveFocus();
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it("keeps cached permissions readable but inert while their live configuration loads", () => {
+    const onSelect = vi.fn();
+    render(
+      <ComposerPermissionPicker
+        label="Permission mode"
+        value="Plan"
+        options={[{ value: "plan", label: "Plan" }]}
+        loading
+        onSelect={onSelect}
+      />,
+    );
+    const trigger = screen.getByRole("button", { name: "Permission mode: Plan" });
+    expect(trigger).toBeDisabled();
+    expect(trigger).toHaveAttribute("aria-busy", "true");
+    expect(trigger).toHaveClass("disabled:opacity-100");
+    fireEvent.pointerDown(trigger, { button: 0 });
+    fireEvent.click(trigger);
+    expect(screen.queryByRole("menu")).toBeNull();
+    expect(onSelect).not.toHaveBeenCalled();
+  });
+
+  it.each([false, true])(
+    "allows cached permission choices while refreshing unless explicitly disabled (%s)",
+    (disabled) => {
+      const onSelect = vi.fn();
+      render(
+        <ComposerPermissionPicker
+          label="Permission mode"
+          value="Default"
+          options={[{ value: "plan", label: "Plan" }]}
+          loading
+          interactiveWhileLoading
+          disabled={disabled}
+          onSelect={onSelect}
+        />,
+      );
+      const trigger = screen.getByRole("button", { name: "Permission mode: Default" });
+      expect(trigger).toHaveAttribute("aria-busy", "true");
+      if (disabled) {
+        expect(trigger).toBeDisabled();
+        fireEvent.pointerDown(trigger, { button: 0 });
+        expect(screen.queryByRole("menu")).toBeNull();
+      } else {
+        expect(trigger).toBeEnabled();
+        fireEvent.keyDown(trigger, { key: "ArrowDown" });
+        fireEvent.click(screen.getByRole("menuitemradio", { name: "Plan" }));
+        expect(onSelect).toHaveBeenCalledWith("plan");
+      }
+    },
+  );
 });
 
 describe("workspace bar label collapse", () => {
