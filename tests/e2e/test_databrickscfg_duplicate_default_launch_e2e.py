@@ -25,6 +25,8 @@ import pytest
 
 pexpect = pytest.importorskip("pexpect")
 
+from tests.e2e.omnigent._pexpect_harness import strip_ansi  # noqa: E402
+
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 
 # Both outcomes surface seconds after the local server boots: the crash prompt,
@@ -60,8 +62,6 @@ host = https://second.example.cloud.databricks.com
 token = dapi-second-placeholder
 """
 
-_ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
-
 # The crash handler's file-an-issue question on a TTY; answered "n" so the
 # crashed process exits and prints the saved report path.
 _CRASH_PROMPT_RE = r"\[Y/n\]"
@@ -75,11 +75,6 @@ _POST_CREDENTIAL_READ_MARKERS = (
     "Omnigent session:",
     "No provider credentials",
 )
-
-
-def _strip_ansi(text: str) -> str:
-    """Remove ANSI escape codes from captured terminal output."""
-    return _ANSI_RE.sub("", text)
 
 
 def _sdk_importable() -> bool:
@@ -138,14 +133,17 @@ def _launch_env(home: Path, *, extra_pythonpath: list[Path]) -> dict[str, str]:
     env["NO_PROXY"] = "127.0.0.1,localhost"
     env["no_proxy"] = "127.0.0.1,localhost"
     env["TERM"] = "xterm-256color"
+    # Skip empty entries: CPython reads an empty PYTHONPATH entry as the cwd.
     env["PYTHONPATH"] = os.pathsep.join(
-        [
+        entry
+        for entry in [
             *(str(p) for p in extra_pythonpath),
             str(_REPO_ROOT),
             str(_REPO_ROOT / "sdks" / "python-client"),
             str(_REPO_ROOT / "sdks" / "ui"),
             env.get("PYTHONPATH", ""),
         ]
+        if entry
     )
     return env
 
@@ -191,7 +189,7 @@ def _launch_until_crash_or_past_credential_read(env: dict[str, str], home: Path)
             log.write(f"\n[test] no crash prompt or startup marker within {_LAUNCH_TIMEOUT_S}s\n")
     finally:
         child.close(force=True)
-    return _strip_ansi(log.getvalue())
+    return strip_ansi(log.getvalue())
 
 
 @pytest.mark.timeout(_LAUNCH_TIMEOUT_S + 90)

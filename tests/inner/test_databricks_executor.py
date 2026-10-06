@@ -2682,21 +2682,25 @@ def test_file_readers_ignore_unparseable_databrickscfg(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """
-    A ``~/.databrickscfg`` malformed beyond duplicate entries (here a key before
+    A ``~/.databrickscfg`` malformed beyond duplicate entries (here a token before
     any section header) resolves to no credentials, with a warning, instead of
     escaping as ``configparser.Error`` from either file reader or from the
-    SDK-first reader that falls back to them.
+    SDK-first reader that falls back to them. Parser errors quote the offending
+    line, so the token must not reach the logs.
     """
     cfg_path = tmp_path / "databrickscfg"
-    cfg_path.write_text("host = https://orphan.cloud.databricks.com\n[DEFAULT]\ntoken = dapi\n")
+    cfg_path.write_text(
+        "token = dapi-orphan-secret\n[DEFAULT]\nhost = https://orphan.cloud.databricks.com\n"
+    )
     monkeypatch.setenv("DATABRICKS_CONFIG_FILE", str(cfg_path))
 
-    with caplog.at_level("WARNING", logger="omnigent.inner.databricks_executor"):
+    with caplog.at_level("DEBUG", logger="omnigent.inner.databricks_executor"):
         assert _read_databrickscfg_file_fallback() is None
         assert _read_databrickscfg_host() is None
         assert _read_databrickscfg() is None
 
     assert any("unparseable" in record.getMessage() for record in caplog.records)
+    assert "dapi-orphan-secret" not in caplog.text
 
 
 def test_databrickscfg_workspace_id_for_host_reads_matching_profile(

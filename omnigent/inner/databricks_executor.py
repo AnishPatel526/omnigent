@@ -91,6 +91,17 @@ class DatabricksCredentials:
     token: str
 
 
+def _describe_config_error(exc: BaseException) -> str:
+    """Describe a credential-resolution error without echoing config file lines.
+
+    ``configparser`` errors quote the offending line, which in a credentials
+    file may be a token, so they are reduced to their class name.
+    """
+    import configparser
+
+    return type(exc).__name__ if isinstance(exc, configparser.Error) else str(exc)
+
+
 def _read_databrickscfg(profile: str | None = None) -> DatabricksCredentials | None:
     """
     Resolve Databricks ``(host, bearer_token)`` for *profile* using the
@@ -156,7 +167,7 @@ def _read_databrickscfg(profile: str | None = None) -> DatabricksCredentials | N
         logger.debug(
             "databricks-sdk credential resolution failed for profile %r: %s",
             sdk_profile,
-            profile_exc,
+            _describe_config_error(profile_exc),
         )
         if sdk_profile is not None:
             # Profile not found; fall back to ambient credentials
@@ -217,7 +228,10 @@ def _read_databrickscfg_file_fallback(profile: str | None = None) -> DatabricksC
     try:
         config.read(cfg_path)
     except configparser.Error as exc:
-        logger.warning("Ignoring unparseable Databricks config %s: %s", cfg_path, exc)
+        # Log only the class: parser errors quote the offending line, which may hold a token.
+        logger.warning(
+            "Ignoring unparseable Databricks config %s (%s)", cfg_path, type(exc).__name__
+        )
         return None
 
     resolved_profile = profile or os.environ.get("DATABRICKS_CONFIG_PROFILE")
@@ -418,7 +432,10 @@ def _read_databrickscfg_host(profile: str | None = None) -> str | None:
     try:
         config.read(cfg_path)
     except configparser.Error as exc:
-        logger.warning("Ignoring unparseable Databricks config %s: %s", cfg_path, exc)
+        # Log only the class: parser errors quote the offending line, which may hold a token.
+        logger.warning(
+            "Ignoring unparseable Databricks config %s (%s)", cfg_path, type(exc).__name__
+        )
         return None
 
     resolved_profile = profile or os.environ.get("DATABRICKS_CONFIG_PROFILE")
@@ -722,7 +739,7 @@ def _resolve_databricks_auth(
     try:
         cfg = Config(profile=sdk_profile)
         cfg.authenticate()
-    except (ValueError, configparser.Error):
+    except (ValueError, configparser.Error) as exc:
         # configparser.Error: the SDK's strict parser rejected the config file
         # (e.g. a duplicated [DEFAULT]); the file fallback below tolerates it.
         if profile is None and sdk_profile is not None:
@@ -737,9 +754,10 @@ def _resolve_databricks_auth(
             # fall back — the user asked for a specific workspace and silently
             # using a different one violates the "Fail loud" principle.
             logger.warning(
-                "Databricks profile %r (from DATABRICKS_CONFIG_PROFILE) not found "
-                "in config file; falling back to ambient credential chain.",
+                "Databricks profile %r (from DATABRICKS_CONFIG_PROFILE) could not be "
+                "resolved (%s); falling back to ambient credential chain.",
                 sdk_profile,
+                _describe_config_error(exc),
             )
             try:
                 cfg = Config()

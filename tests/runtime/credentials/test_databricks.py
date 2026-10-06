@@ -167,15 +167,25 @@ def test_sdk_rejecting_duplicate_default_sections_falls_through_to_cfg(
 def test_unparseable_cfg_reports_no_credentials_instead_of_crashing(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
-    # A key before any section header is malformed beyond what strict=False
-    # tolerates; the resolver must end in its usual OSError, not a parse error.
-    cfg = _write_cfg(tmp_path, "host = https://orphan.example.com\n[DEFAULT]\ntoken = t\n")
+    # A token before any section header is malformed beyond what strict=False
+    # tolerates: the real SDK parser and the cfg fallback both reject it. The
+    # resolver must end in its usual OSError and keep the token out of the logs.
+    monkeypatch.setattr("databricks.sdk.config.Config", _RealSdkConfig)
+    for var in [name for name in os.environ if name.startswith("DATABRICKS_")]:
+        monkeypatch.delenv(var)
+    cfg = _write_cfg(
+        tmp_path, "token = dapi-orphan-secret\n[DEFAULT]\nhost = https://x.example.com\n"
+    )
     monkeypatch.setenv("DATABRICKS_CONFIG_FILE", str(cfg))
 
-    with caplog.at_level("WARNING"), pytest.raises(OSError):
+    with (
+        caplog.at_level("DEBUG", logger="omnigent.runtime.credentials.databricks"),
+        pytest.raises(OSError),
+    ):
         resolve_databricks_workspace(profile=None)
 
     assert any("unparseable" in record.getMessage() for record in caplog.records)
+    assert "dapi-orphan-secret" not in caplog.text
 
 
 def test_named_profile_overrides_default(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
