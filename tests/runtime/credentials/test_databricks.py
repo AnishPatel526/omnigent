@@ -8,13 +8,13 @@ from pathlib import Path
 
 import pytest
 
-# Bound at import time, before the autouse fixture stubs the module attribute.
-from databricks.sdk.config import Config as _RealSdkConfig
-
 from omnigent.runtime.credentials.databricks import (
     WorkspaceCreds,
     resolve_databricks_workspace,
 )
+
+# Bound at import time, before the autouse fixture stubs the module attribute.
+_RealSdkConfig = pytest.importorskip("databricks.sdk.config").Config
 
 
 @pytest.fixture(autouse=True)
@@ -166,15 +166,25 @@ def test_sdk_rejecting_duplicate_default_sections_falls_through_to_cfg(
 
 _UNPARSEABLE_CFGS = {
     # A token before any section header: MissingSectionHeaderError quotes the line.
-    "orphan-token": b"token = dapi-orphan\n[DEFAULT]\nhost = https://x.example.com\n",
-    # Non-UTF-8 bytes: UnicodeDecodeError, a ValueError the SDK path already tolerates.
-    "undecodable": b"\xff\xfe[DEFAULT]\nhost = https://x.example.com\ntoken = dapi-orphan\n",
+    "orphan-token": (
+        b"token = dapi-orphan\n[DEFAULT]\nhost = https://x.example.com\n",
+        "MissingSectionHeaderError",
+    ),
+    # Bytes invalid in UTF-8 and cp1252: UnicodeDecodeError, a ValueError the SDK
+    # path already tolerates.
+    "undecodable": (
+        b"\x81\x8d[DEFAULT]\nhost = https://x.example.com\ntoken = dapi-orphan\n",
+        "UnicodeDecodeError",
+    ),
 }
 
 
-@pytest.mark.parametrize("content", list(_UNPARSEABLE_CFGS.values()), ids=list(_UNPARSEABLE_CFGS))
+@pytest.mark.parametrize(
+    "content, error_name", list(_UNPARSEABLE_CFGS.values()), ids=list(_UNPARSEABLE_CFGS)
+)
 def test_unparseable_cfg_reports_no_credentials_instead_of_crashing(
     content: bytes,
+    error_name: str,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     caplog: pytest.LogCaptureFixture,
@@ -195,7 +205,8 @@ def test_unparseable_cfg_reports_no_credentials_instead_of_crashing(
     ):
         resolve_databricks_workspace(profile=None)
 
-    assert any("unparseable" in record.getMessage() for record in caplog.records)
+    # The warning names the file and the error class only, never the offending line.
+    assert any(f"({error_name})" in record.getMessage() for record in caplog.records)
     assert "dapi-orphan" not in caplog.text
 
 

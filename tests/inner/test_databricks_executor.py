@@ -2700,15 +2700,25 @@ def test_resolve_databricks_auth_uses_pat_when_sdk_rejects_duplicate_default_sec
 
 _UNPARSEABLE_CFGS = {
     # A token before any section header: MissingSectionHeaderError quotes the line.
-    "orphan-token": b"token = dapi-orphan\n[DEFAULT]\nhost = https://x.example.com\n",
-    # Non-UTF-8 bytes: UnicodeDecodeError, a ValueError the SDK path already tolerates.
-    "undecodable": b"\xff\xfe[DEFAULT]\nhost = https://x.example.com\ntoken = dapi-orphan\n",
+    "orphan-token": (
+        b"token = dapi-orphan\n[DEFAULT]\nhost = https://x.example.com\n",
+        "MissingSectionHeaderError",
+    ),
+    # Bytes invalid in UTF-8 and cp1252: UnicodeDecodeError, a ValueError the SDK
+    # path already tolerates.
+    "undecodable": (
+        b"\x81\x8d[DEFAULT]\nhost = https://x.example.com\ntoken = dapi-orphan\n",
+        "UnicodeDecodeError",
+    ),
 }
 
 
-@pytest.mark.parametrize("content", list(_UNPARSEABLE_CFGS.values()), ids=list(_UNPARSEABLE_CFGS))
+@pytest.mark.parametrize(
+    "content, error_name", list(_UNPARSEABLE_CFGS.values()), ids=list(_UNPARSEABLE_CFGS)
+)
 def test_file_readers_ignore_unparseable_databrickscfg(
     content: bytes,
+    error_name: str,
     tmp_path: _Path,
     monkeypatch: pytest.MonkeyPatch,
     clean_databricks_env: None,
@@ -2716,9 +2726,10 @@ def test_file_readers_ignore_unparseable_databrickscfg(
 ) -> None:
     """
     A ``~/.databrickscfg`` malformed beyond duplicate entries resolves to no
-    credentials, with a warning, instead of escaping from either file reader or
-    from the SDK-first reader that falls back to them. Parser errors quote the
-    offending line, so the token must not reach the logs.
+    credentials or workspace id, with a warning from the credential readers,
+    instead of escaping from any reader or from the SDK-first reader that falls
+    back to them. Parser errors quote the offending line, so the token must not
+    reach the logs.
     """
     cfg_path = tmp_path / "databrickscfg"
     cfg_path.write_bytes(content)
@@ -2728,8 +2739,11 @@ def test_file_readers_ignore_unparseable_databrickscfg(
         assert _read_databrickscfg_file_fallback() is None
         assert _read_databrickscfg_host() is None
         assert _read_databrickscfg() is None
+        assert databrickscfg_workspace_id_for_profile("DEFAULT") is None
+        assert databrickscfg_workspace_id_for_host("https://x.example.com") is None
 
-    assert any("unparseable" in record.getMessage() for record in caplog.records)
+    # The warning names the file and the error class only, never the offending line.
+    assert any(f"({error_name})" in record.getMessage() for record in caplog.records)
     assert "dapi-orphan" not in caplog.text
 
 

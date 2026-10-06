@@ -208,16 +208,10 @@ def test_run_with_duplicate_default_databrickscfg_does_not_crash(
     no_databricks_sdk_shim: Path,
     stop_local_daemon: list[dict[str, str]],
 ) -> None:
-    """A duplicated ``[DEFAULT]`` in ``~/.databrickscfg`` must not crash the launch.
+    """Startup passes duplicate-default credential loading with and without databricks-sdk.
 
-    Journey: ``~/.databrickscfg`` carries two ``[DEFAULT]`` blocks -> ``omnigent
-    run ~/agent.yaml``. A strict ConfigParser (the file fallback without the
-    SDK, or the SDK's own config loader with it) raises
-    ``configparser.DuplicateOptionError: ... option 'host' in section 'DEFAULT'
-    already exists`` and the launch dies on the crash-handler screen. The
-    credential read must tolerate the duplicate so the launch proceeds into
-    session/runner bring-up (it may still fail gracefully later on missing
-    model credentials).
+    The launch may still fail gracefully later on missing model credentials; it
+    must never reach the crash handler.
     """
     if sdk_installed and not _sdk_importable():
         pytest.skip("databricks-sdk is not installed in this environment")

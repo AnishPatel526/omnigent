@@ -279,6 +279,18 @@ def _read_section(config: configparser.ConfigParser, section: str) -> WorkspaceC
     )
 
 
+def _chains_parse_error(exc: BaseException) -> bool:
+    """Whether *exc* or any exception chained below it is a ``configparser.Error``."""
+    seen: set[int] = set()
+    link: BaseException | None = exc
+    while link is not None and id(link) not in seen:
+        seen.add(id(link))
+        if isinstance(link, configparser.Error):
+            return True
+        link = link.__cause__ or link.__context__
+    return False
+
+
 def _call_sdk_authenticate(profile: str | None) -> WorkspaceCreds | None:
     """
     Call ``databricks-sdk``'s ``Config.authenticate()`` once and unpack
@@ -316,8 +328,7 @@ def _call_sdk_authenticate(profile: str | None) -> WorkspaceCreds | None:
         # surface via root's lastResort handler to stderr, drowning the
         # clean ClickException. INFO still lands in cli-*.log; frames are
         # debug-only so a TTY-mirrored host console stays concise.
-        chain = (exc, exc.__cause__, exc.__context__)  # parser text may quote a token line
-        is_parse_error = any(isinstance(link, configparser.Error) for link in chain if link)
+        is_parse_error = _chains_parse_error(exc)  # parser text may quote a token line
         _logger.info(
             "databricks-sdk Config(profile=%r).authenticate() failed: %s — "
             "falling through to configparser path.",

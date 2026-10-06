@@ -100,9 +100,13 @@ def _describe_config_error(exc: BaseException) -> str:
     """
     import configparser
 
-    chain = (exc, exc.__cause__, exc.__context__)
-    if any(isinstance(link, configparser.Error) for link in chain if link is not None):
-        return type(exc).__name__
+    seen: set[int] = set()
+    link: BaseException | None = exc
+    while link is not None and id(link) not in seen:
+        seen.add(id(link))
+        if isinstance(link, configparser.Error):
+            return type(exc).__name__
+        link = link.__cause__ or link.__context__
     return str(exc)
 
 
@@ -968,7 +972,7 @@ def _read_databrickscfg_no_inheritance() -> configparser.ConfigParser | None:
     config = configparser.ConfigParser(default_section=_NO_DEFAULT_INHERITANCE, strict=False)
     try:
         config.read(cfg_path)
-    except configparser.Error:
+    except (configparser.Error, UnicodeDecodeError):
         return None
     return config
 
@@ -1138,7 +1142,7 @@ def databrickscfg_workspace_id_for_host(host: str) -> str | None:
     config = configparser.ConfigParser(strict=False)
     try:
         config.read(cfg_path)
-    except configparser.Error:
+    except (configparser.Error, UnicodeDecodeError):
         return None
     for section in _databrickscfg_profiles_for_host(host):
         values = config.defaults() if section == "DEFAULT" else config[section]
@@ -1160,7 +1164,7 @@ def databrickscfg_workspace_id_for_profile(profile: str) -> str | None:
     config = configparser.ConfigParser(strict=False)
     try:
         config.read(cfg_path)
-    except configparser.Error:
+    except (configparser.Error, UnicodeDecodeError):
         return None
     if profile == "DEFAULT":
         values = config.defaults()
