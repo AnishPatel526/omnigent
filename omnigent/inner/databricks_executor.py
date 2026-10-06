@@ -95,11 +95,15 @@ def _describe_config_error(exc: BaseException) -> str:
     """Describe a credential-resolution error without echoing config file lines.
 
     ``configparser`` errors quote the offending line, which in a credentials
-    file may be a token, so they are reduced to their class name.
+    file may be a token, so they (and errors chained from one) are reduced to
+    their class name.
     """
     import configparser
 
-    return type(exc).__name__ if isinstance(exc, configparser.Error) else str(exc)
+    chain = (exc, exc.__cause__, exc.__context__)
+    if any(isinstance(link, configparser.Error) for link in chain if link is not None):
+        return type(exc).__name__
+    return str(exc)
 
 
 def _read_databrickscfg(profile: str | None = None) -> DatabricksCredentials | None:
@@ -227,7 +231,7 @@ def _read_databrickscfg_file_fallback(profile: str | None = None) -> DatabricksC
     config = configparser.ConfigParser(strict=False)
     try:
         config.read(cfg_path)
-    except configparser.Error as exc:
+    except (configparser.Error, UnicodeDecodeError) as exc:
         # Log only the class: parser errors quote the offending line, which may hold a token.
         logger.warning(
             "Ignoring unparseable Databricks config %s (%s)", cfg_path, type(exc).__name__
@@ -431,7 +435,7 @@ def _read_databrickscfg_host(profile: str | None = None) -> str | None:
     config = configparser.ConfigParser(strict=False)
     try:
         config.read(cfg_path)
-    except configparser.Error as exc:
+    except (configparser.Error, UnicodeDecodeError) as exc:
         # Log only the class: parser errors quote the offending line, which may hold a token.
         logger.warning(
             "Ignoring unparseable Databricks config %s (%s)", cfg_path, type(exc).__name__

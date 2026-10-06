@@ -164,18 +164,29 @@ def test_sdk_rejecting_duplicate_default_sections_falls_through_to_cfg(
     assert creds == WorkspaceCreds(host="https://second.example.com", token="second-token")
 
 
+_UNPARSEABLE_CFGS = {
+    # A token before any section header: MissingSectionHeaderError quotes the line.
+    "orphan-token": b"token = dapi-orphan\n[DEFAULT]\nhost = https://x.example.com\n",
+    # Non-UTF-8 bytes: UnicodeDecodeError, a ValueError the SDK path already tolerates.
+    "undecodable": b"\xff\xfe[DEFAULT]\nhost = https://x.example.com\ntoken = dapi-orphan\n",
+}
+
+
+@pytest.mark.parametrize("content", list(_UNPARSEABLE_CFGS.values()), ids=list(_UNPARSEABLE_CFGS))
 def test_unparseable_cfg_reports_no_credentials_instead_of_crashing(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    content: bytes,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
-    # A token before any section header is malformed beyond what strict=False
-    # tolerates: the real SDK parser and the cfg fallback both reject it. The
-    # resolver must end in its usual OSError and keep the token out of the logs.
+    # Malformed beyond what strict=False tolerates: the real SDK parser and the
+    # cfg fallback both reject it. The resolver must end in its usual OSError
+    # and keep the token out of the logs.
     monkeypatch.setattr("databricks.sdk.config.Config", _RealSdkConfig)
     for var in [name for name in os.environ if name.startswith("DATABRICKS_")]:
         monkeypatch.delenv(var)
-    cfg = _write_cfg(
-        tmp_path, "token = dapi-orphan-secret\n[DEFAULT]\nhost = https://x.example.com\n"
-    )
+    cfg = tmp_path / "databrickscfg"
+    cfg.write_bytes(content)
     monkeypatch.setenv("DATABRICKS_CONFIG_FILE", str(cfg))
 
     with (
@@ -185,7 +196,7 @@ def test_unparseable_cfg_reports_no_credentials_instead_of_crashing(
         resolve_databricks_workspace(profile=None)
 
     assert any("unparseable" in record.getMessage() for record in caplog.records)
-    assert "dapi-orphan-secret" not in caplog.text
+    assert "dapi-orphan" not in caplog.text
 
 
 def test_named_profile_overrides_default(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

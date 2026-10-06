@@ -66,9 +66,8 @@ token = dapi-second-placeholder
 # crashed process exits and prints the saved report path.
 _CRASH_PROMPT_RE = r"\[Y/n\]"
 
-# Startup output that only prints AFTER the ambient credential read (the
-# crash site): ``_remote_headers`` runs once "Preparing your agent…" is
-# shown, and these come from the session/runner bring-up that follows it.
+# Startup markers printed only after the ambient credential read (the crash
+# site), so seeing any of them proves the read succeeded.
 _POST_CREDENTIAL_READ_MARKERS = (
     "Connecting…",
     "Launching your agent…",
@@ -80,7 +79,7 @@ _POST_CREDENTIAL_READ_MARKERS = (
 def _sdk_importable() -> bool:
     try:
         import databricks.sdk.config  # noqa: F401
-    except Exception:
+    except ImportError:
         return False
     return True
 
@@ -150,18 +149,27 @@ def _launch_env(home: Path, *, extra_pythonpath: list[Path]) -> dict[str, str]:
 
 @pytest.fixture
 def stop_local_daemon() -> Iterator[list[dict[str, str]]]:
-    """Stop the local daemon/server each launch boots before the crash site."""
+    """Stop only the daemon/server each launch recorded under its isolated data dir.
+
+    ``omnigent stop`` would also sweep the canonical port and could kill a
+    developer's unrelated server, so daemons go through ``host stop`` and the
+    server through its own pidfile.
+    """
     envs: list[dict[str, str]] = []
     yield envs
     for env in envs:
-        subprocess.run(
-            [*_omnigent_command(), "stop"],
-            env=env,
-            cwd=env["HOME"],
-            capture_output=True,
-            timeout=60,
-            check=False,
-        )
+        for command in (
+            [*_omnigent_command(), "host", "stop", "--all", "--daemon-only", "--force"],
+            [
+                sys.executable,
+                "-c",
+                "from omnigent.host.local_server import stop_local_omnigent_server; "
+                "stop_local_omnigent_server()",
+            ],
+        ):
+            subprocess.run(
+                command, env=env, cwd=env["HOME"], capture_output=True, timeout=60, check=False
+            )
 
 
 def _launch_until_crash_or_past_credential_read(env: dict[str, str], home: Path) -> str:

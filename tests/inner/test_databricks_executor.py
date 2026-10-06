@@ -2522,7 +2522,11 @@ def test_stream_ended_without_finish_reason_with_content_completes() -> None:
 
 
 def _write_duplicate_default_cfg(tmp_path: _Path, monkeypatch: pytest.MonkeyPatch) -> _Path:
-    """Point ``DATABRICKS_CONFIG_FILE`` at a cfg whose ``[DEFAULT]`` block repeats."""
+    """Point ``DATABRICKS_CONFIG_FILE`` at a cfg whose ``[DEFAULT]`` block repeats.
+
+    A named section and one of its keys repeat too, so the same file covers
+    every duplicate form ``strict=False`` has to resolve.
+    """
     cfg_path = tmp_path / "databrickscfg"
     cfg_path.write_text(
         textwrap.dedent(
@@ -2534,6 +2538,14 @@ def _write_duplicate_default_cfg(tmp_path: _Path, monkeypatch: pytest.MonkeyPatc
             [DEFAULT]
             host = https://second.cloud.databricks.com
             token = dapi-second
+
+            [acme]
+            host = https://acme-old.cloud.databricks.com
+            token = dapi-acme-old
+            token = dapi-acme
+
+            [acme]
+            host = https://acme.cloud.databricks.com
             """
         ).lstrip()
     )
@@ -2546,7 +2558,8 @@ def test_read_databrickscfg_fallback_tolerates_duplicate_default_section(
 ) -> None:
     """
     Duplicate ``[DEFAULT]`` entries (as written by the Databricks VS Code
-    extension) resolve to the last-defined values in both file readers.
+    extension), repeated named sections and repeated keys all resolve to the
+    last-defined values in both file readers.
     """
     _write_duplicate_default_cfg(tmp_path, monkeypatch)
 
@@ -2554,9 +2567,14 @@ def test_read_databrickscfg_fallback_tolerates_duplicate_default_section(
     assert creds is not None
     assert creds.host == "https://second.cloud.databricks.com"
     assert creds.token == "dapi-second"
+    acme = _read_databrickscfg_file_fallback("acme")
+    assert acme is not None
+    assert acme.host == "https://acme.cloud.databricks.com"
+    assert acme.token == "dapi-acme"
 
     # The host-only reader must survive the same file too.
     assert _read_databrickscfg_host() == "https://second.cloud.databricks.com"
+    assert _read_databrickscfg_host("acme") == "https://acme.cloud.databricks.com"
 
 
 def test_workspace_id_for_profile_tolerates_duplicate_default_section(
@@ -2590,8 +2608,9 @@ def test_workspace_id_for_host_tolerates_duplicate_default_section(
 ) -> None:
     """
     Host-based ``workspace_id`` lookup still matches profiles when the cfg
-    carries a duplicate ``[DEFAULT]``; the repeated block resolves to its
-    last-defined values.
+    carries a duplicate ``[DEFAULT]`` or a repeated named section; each
+    repeated block resolves to its last-defined values, so only the final
+    host matches.
     """
     cfg_path = tmp_path / "databrickscfg"
     cfg_path.write_text(
@@ -2606,9 +2625,12 @@ def test_workspace_id_for_host_tolerates_duplicate_default_section(
             workspace_id = 2222222222222222
 
             [acme]
-            host = https://acme.databricks.com
+            host = https://acme-old.databricks.com
             workspace_id = 1965859176160743
             auth_type = databricks-cli
+
+            [acme]
+            host = https://acme.databricks.com
             """
         ).lstrip()
     )
@@ -2620,6 +2642,7 @@ def test_workspace_id_for_host_tolerates_duplicate_default_section(
         == "2222222222222222"
     )
     assert databrickscfg_workspace_id_for_host("https://first.cloud.databricks.com") is None
+    assert databrickscfg_workspace_id_for_host("https://acme-old.databricks.com") is None
 
 
 @pytest.mark.parametrize("profile", [None, "DEFAULT"], ids=["ambient", "explicit-default"])
@@ -2675,23 +2698,30 @@ def test_resolve_databricks_auth_uses_pat_when_sdk_rejects_duplicate_default_sec
     assert auth.current_token() == "dapi-second"
 
 
+_UNPARSEABLE_CFGS = {
+    # A token before any section header: MissingSectionHeaderError quotes the line.
+    "orphan-token": b"token = dapi-orphan\n[DEFAULT]\nhost = https://x.example.com\n",
+    # Non-UTF-8 bytes: UnicodeDecodeError, a ValueError the SDK path already tolerates.
+    "undecodable": b"\xff\xfe[DEFAULT]\nhost = https://x.example.com\ntoken = dapi-orphan\n",
+}
+
+
+@pytest.mark.parametrize("content", list(_UNPARSEABLE_CFGS.values()), ids=list(_UNPARSEABLE_CFGS))
 def test_file_readers_ignore_unparseable_databrickscfg(
+    content: bytes,
     tmp_path: _Path,
     monkeypatch: pytest.MonkeyPatch,
     clean_databricks_env: None,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """
-    A ``~/.databrickscfg`` malformed beyond duplicate entries (here a token before
-    any section header) resolves to no credentials, with a warning, instead of
-    escaping as ``configparser.Error`` from either file reader or from the
-    SDK-first reader that falls back to them. Parser errors quote the offending
-    line, so the token must not reach the logs.
+    A ``~/.databrickscfg`` malformed beyond duplicate entries resolves to no
+    credentials, with a warning, instead of escaping from either file reader or
+    from the SDK-first reader that falls back to them. Parser errors quote the
+    offending line, so the token must not reach the logs.
     """
     cfg_path = tmp_path / "databrickscfg"
-    cfg_path.write_text(
-        "token = dapi-orphan-secret\n[DEFAULT]\nhost = https://orphan.cloud.databricks.com\n"
-    )
+    cfg_path.write_bytes(content)
     monkeypatch.setenv("DATABRICKS_CONFIG_FILE", str(cfg_path))
 
     with caplog.at_level("DEBUG", logger="omnigent.inner.databricks_executor"):
@@ -2700,7 +2730,7 @@ def test_file_readers_ignore_unparseable_databrickscfg(
         assert _read_databrickscfg() is None
 
     assert any("unparseable" in record.getMessage() for record in caplog.records)
-    assert "dapi-orphan-secret" not in caplog.text
+    assert "dapi-orphan" not in caplog.text
 
 
 def test_databrickscfg_workspace_id_for_host_reads_matching_profile(

@@ -316,7 +316,8 @@ def _call_sdk_authenticate(profile: str | None) -> WorkspaceCreds | None:
         # surface via root's lastResort handler to stderr, drowning the
         # clean ClickException. INFO still lands in cli-*.log; frames are
         # debug-only so a TTY-mirrored host console stays concise.
-        is_parse_error = isinstance(exc, configparser.Error)  # its text may quote a token line
+        chain = (exc, exc.__cause__, exc.__context__)  # parser text may quote a token line
+        is_parse_error = any(isinstance(link, configparser.Error) for link in chain if link)
         _logger.info(
             "databricks-sdk Config(profile=%r).authenticate() failed: %s — "
             "falling through to configparser path.",
@@ -404,7 +405,7 @@ def _try_resolve_from_cfg(profile: str | None, cfg_path: Path) -> WorkspaceCreds
     config = configparser.ConfigParser(strict=False)
     try:
         config.read(cfg_path)
-    except configparser.Error as exc:
+    except (configparser.Error, UnicodeDecodeError) as exc:
         # Log only the class: parser errors quote the offending line, which may hold a token.
         _logger.warning(
             "Ignoring unparseable Databricks config %s (%s)", cfg_path, type(exc).__name__
