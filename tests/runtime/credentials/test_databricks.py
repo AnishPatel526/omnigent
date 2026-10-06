@@ -114,9 +114,8 @@ def test_duplicate_default_sections_resolve_instead_of_crashing(
 ) -> None:
     """
     A ``.databrickscfg`` with a duplicate ``[DEFAULT]`` section (as written
-    by the Databricks VS Code extension) must resolve instead of raising
-    ``configparser.DuplicateOptionError``. Non-strict parsing keeps the
-    last value, matching the databricks-sdk and the executor's readers.
+    by the Databricks VS Code extension) resolves to the last-defined host
+    and token instead of raising ``configparser.DuplicateOptionError``.
     """
     cfg = _write_cfg(
         tmp_path,
